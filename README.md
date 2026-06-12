@@ -78,42 +78,50 @@ MVP 聚焦一个可控主题：
 └── README.md                    # 中文 README
 ```
 
-## 当前 PR 状态
+## 当前实现状态
 
-第一次 PR 只初始化项目文档与仓库结构，暂不加入运行时代码。
+当前仓库已经包含前端绘图工作台原型。前端可以本地启动，用于演示语音入口、确认流、绘图阶段、图层面板和本地 mock 指令解析。
 
-本 PR 包含：
+已包含：
 
 - 项目 README
 - 英文 README
 - 启动说明
 - 设计文档
 - 架构说明
+- API 合约
 - PR 模板
 - 环境变量示例
-- frontend/backend 目录占位
 - 比赛规范 checklist
 - PRD 文档
+- 前端 Vite + React 工作台原型
 
-本 PR 不包含：
+暂未包含：
 
-- 可运行前端应用
 - 可运行后端服务
 - ASR/TTS 接入
 - LLM 指令解析接入
-- 绘图引擎实现
+- 工程持久化实现
 
 ## 启动说明
 
-PR 1 尚未创建运行时代码，因此当前没有可启动应用。后续前后端脚手架加入后，计划使用以下命令：
+前端工作台当前可以本地启动：
 
 ```bash
-# 前端
 cd frontend
 npm install
 npm run dev
+```
 
-# 后端
+默认开发地址：
+
+```text
+http://localhost:3000
+```
+
+后端仍在计划阶段，后续将按 API 合约补充：
+
+```bash
 cd backend
 npm install
 npm run dev
@@ -126,6 +134,7 @@ npm run dev
 - [PRD](docs/PRD-ai-voice-drawing.md)
 - [设计文档](docs/design.md)
 - [架构说明](docs/architecture.md)
+- [API 合约](docs/api-contract.md)
 - [启动说明](docs/startup.md)
 - [比赛工程规范](competition-requirements.md)
 - [English README](README.en.md)

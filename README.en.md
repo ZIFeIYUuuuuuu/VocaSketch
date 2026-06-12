@@ -72,42 +72,48 @@ The project does not use end-to-end image generation as the main drawing path. T
 └── README.md                    # Chinese README
 ```
 
-## Current PR Status
+## Current Implementation Status
 
-This first PR initializes the project documentation and repository structure. Runtime application code will be added in later PRs.
+The repository now includes a runnable frontend drawing workspace prototype. It demonstrates the voice entry point, confirmation flow, drawing stages, layer panel, and local mock command parsing.
 
-Included in this PR:
+Included:
 
 - project README
 - startup guide
 - architecture and design documentation
+- API contract
 - PR template
 - environment variable example
-- frontend and backend directory placeholders
 - competition requirement checklist
 - PRD document
+- Vite + React frontend workspace prototype
 
-Not included in this PR:
+Not included yet:
 
-- runnable frontend app
 - runnable backend service
 - ASR/TTS integration
 - LLM parser integration
-- drawing engine implementation
+- project persistence implementation
 
 ## Startup Guide
 
-The application runtime is not scaffolded in PR 1. See [docs/startup.md](docs/startup.md) for the current setup plan and future startup commands.
-
-Expected later workflow:
+The frontend workspace can run locally:
 
 ```bash
-# frontend
 cd frontend
 npm install
 npm run dev
+```
 
-# backend
+Default URL:
+
+```text
+http://localhost:3000
+```
+
+The backend service is still planned:
+
+```bash
 cd backend
 npm install
 npm run dev
@@ -118,6 +124,7 @@ npm run dev
 - [PRD](docs/PRD-ai-voice-drawing.md)
 - [Design Document](docs/design.md)
 - [Architecture Notes](docs/architecture.md)
+- [API Contract](docs/api-contract.md)
 - [Startup Guide](docs/startup.md)
 - [Competition Requirements](competition-requirements.md)
 

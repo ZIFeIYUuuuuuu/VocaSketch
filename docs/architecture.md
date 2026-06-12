@@ -48,6 +48,8 @@ The adapter should support provider replacement:
 - DashScope or another official provider later
 - local command parser for high-frequency control commands
 
+The concrete MVP HTTP API contract is documented in [api-contract.md](api-contract.md).
+
 ## Drawing Engine
 
 The drawing engine should operate on structured commands instead of free text.
