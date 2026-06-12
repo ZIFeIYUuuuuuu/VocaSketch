@@ -44,7 +44,6 @@ import type { CommandInterpretation, DrawingOperation, ProjectHistoryEntry } fro
 const SpeechRecognitionAPI =
   (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4000/api/v1';
 const SESSION_STORAGE_KEY = 'vocasketch.sessionId';
 const PROJECT_STORAGE_KEY = 'vocasketch.projectId';
 const AUTO_RECORD_MAX_MS = 6500;
@@ -77,7 +76,6 @@ export default function App() {
   });
 
   const [isLightMode, setIsLightMode] = useState<boolean>(true);
-
   // Target config planned by NLP interpretation (awaiting confirm)
   const [pendingConfig, setPendingConfig] = useState<Partial<CharacterConfig> | null>(null);
   const [isAwaitingConfirm, setIsAwaitingConfirm] = useState<boolean>(false);
@@ -122,13 +120,6 @@ export default function App() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaChunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
-  const realtimeSocketRef = useRef<WebSocket | null>(null);
-  const realtimeAudioContextRef = useRef<AudioContext | null>(null);
-  const realtimeSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const realtimeProcessorRef = useRef<ScriptProcessorNode | null>(null);
-  const realtimeFinalTranscriptRef = useRef<string>('');
-  const realtimePartialTranscriptRef = useRef<string>('');
-  const realtimeStoppingRef = useRef<boolean>(false);
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
   const recorderStopRequestedRef = useRef<boolean>(false);
   const recorderStopHandledRef = useRef<boolean>(false);
