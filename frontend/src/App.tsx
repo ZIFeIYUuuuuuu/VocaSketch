@@ -46,6 +46,13 @@ const SpeechRecognitionAPI =
 
 const SESSION_STORAGE_KEY = 'vocasketch.sessionId';
 const PROJECT_STORAGE_KEY = 'vocasketch.projectId';
+const STAGE_BOUNDARIES = {
+  sketchDone: 25,
+  lineDone: 50,
+  flatsDone: 70,
+  watercolorDone: 90
+} as const;
+type RedrawTarget = 'hair' | 'eyes' | 'expression' | 'outfit' | 'accessory' | 'background';
 
 export default function App() {
   // -------------------------------------------------------------------------
@@ -96,6 +103,7 @@ export default function App() {
   const [currentStage, setCurrentStage] = useState<DrawStage>('未开始');
   const [systemState, setSystemState] = useState<SystemState>('等待指令');
   const [paintMode, setPaintMode] = useState<'auto' | 'stages'>('auto');
+  const [lastRedrawTarget, setLastRedrawTarget] = useState<RedrawTarget | null>(null);
 
   // Multi-line subtitles & logs
   const [userSpeechSub, setUserSpeechSub] = useState<string>('');
@@ -113,6 +121,7 @@ export default function App() {
 
   // Painting drawing loop timer ref
   const paintTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const redrawPulseTimerRef = useRef<NodeJS.Timeout | null>(null);
   const bootstrapStartedRef = useRef<boolean>(false);
 
   // UI layout extra toggles
@@ -131,6 +140,17 @@ export default function App() {
       text,
     };
     setVoiceLogs((prev) => [newLog, ...prev]);
+  };
+
+  const triggerRedrawPulse = (target: RedrawTarget) => {
+    setLastRedrawTarget(target);
+    if (redrawPulseTimerRef.current) {
+      clearTimeout(redrawPulseTimerRef.current);
+    }
+    redrawPulseTimerRef.current = setTimeout(() => {
+      setLastRedrawTarget(null);
+      redrawPulseTimerRef.current = null;
+    }, 2000);
   };
 
   const playAssistantSpeech = async (text: string) => {
@@ -199,6 +219,12 @@ export default function App() {
     pushLog('system', '🎨 AI 语音数位绘画工作台控制引擎就绪。');
     pushLog('system', '您可以开启麦克风或点击右侧【快捷剧本模拟】体验高精绘图。');
     pushLog('ai', '您好，我是您的数位绘画助理。说出指令如“画一个蓝色长发女生半身像，水彩素描风”，我们即可开始创作！');
+
+    return () => {
+      if (redrawPulseTimerRef.current) {
+        clearTimeout(redrawPulseTimerRef.current);
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -277,15 +303,15 @@ export default function App() {
   useEffect(() => {
     if (drawProgress === 0) {
       setCurrentStage('未开始');
-    } else if (drawProgress > 0 && drawProgress < 25) {
+    } else if (drawProgress > 0 && drawProgress < STAGE_BOUNDARIES.sketchDone) {
       setCurrentStage('草图阶段');
-    } else if (drawProgress >= 25 && drawProgress < 50) {
+    } else if (drawProgress >= STAGE_BOUNDARIES.sketchDone && drawProgress < STAGE_BOUNDARIES.lineDone) {
       setCurrentStage('线稿阶段');
-    } else if (drawProgress >= 50 && drawProgress < 75) {
+    } else if (drawProgress >= STAGE_BOUNDARIES.lineDone && drawProgress < STAGE_BOUNDARIES.flatsDone) {
       setCurrentStage('铺色阶段');
-    } else if (drawProgress >= 75 && drawProgress < 85) {
+    } else if (drawProgress >= STAGE_BOUNDARIES.flatsDone && drawProgress < STAGE_BOUNDARIES.watercolorDone) {
       setCurrentStage('水彩晕染');
-    } else if (drawProgress >= 85 && drawProgress < 100) {
+    } else if (drawProgress >= STAGE_BOUNDARIES.watercolorDone && drawProgress < 100) {
       setCurrentStage('细节刻画');
     } else if (drawProgress >= 100) {
       setCurrentStage('已完成');
@@ -304,44 +330,57 @@ export default function App() {
     pushLog('system', `绘画引擎激活，当前从 ${startFromProgress}% 渐进渲染...`);
 
     const intervalMs = 120; // Ticking Interval
-    const progressStep = 1.35; // Increment to fill 100% in ~9 seconds (or matching requirements)
 
     paintTimerRef.current = setInterval(() => {
       setDrawProgress((prevProgress) => {
+        const progressStep =
+          prevProgress >= STAGE_BOUNDARIES.flatsDone && prevProgress < STAGE_BOUNDARIES.watercolorDone
+            ? 0.58
+            : 1.35;
         const nextProgress = prevProgress + progressStep;
 
         // "STAGES MODE (分阶段单步确认模式)" CHECK:
         // We pause at step boundaries and await user verbal/manual OK.
         if (paintMode === 'stages') {
           // Check sketch complete (25%)
-          if (prevProgress < 25 && nextProgress >= 25) {
+          if (prevProgress < STAGE_BOUNDARIES.sketchDone && nextProgress >= STAGE_BOUNDARIES.sketchDone) {
             clearInterval(paintTimerRef.current!);
             setSystemState('等待确认');
             pushLog('ai', '🎨 [草图绘制阶段已达成 25%] 结构线条规划完毕。请问确认进入【线稿阶段】继续精描吗？');
             setAiSpeechSub('草图层绘制完成。是否允许我继续渲染【线稿层】精细毛刷？说“确认”或“继续”。');
             setIsAwaitingConfirm(true);
             setPendingVerb('edit'); // mock confirm action to trigger next progress
-            return 25;
+            return STAGE_BOUNDARIES.sketchDone;
           }
           // Check lineart complete (50%)
-          if (prevProgress < 50 && nextProgress >= 50) {
+          if (prevProgress < STAGE_BOUNDARIES.lineDone && nextProgress >= STAGE_BOUNDARIES.lineDone) {
             clearInterval(paintTimerRef.current!);
             setSystemState('等待确认');
-            pushLog('ai', '🎨 [精细线稿阶段已达成 50%] 人物墨线雕琢完毕。请问确认进入【铺色与水彩上色阶段】吗？');
-            setAiSpeechSub('线稿层校对结束。是否允许开始在配饰及身体上铺染色彩？说“确认”或“继续”。');
+            pushLog('ai', '🎨 [精细线稿阶段已达成 50%] 人物墨线雕琢完毕。请问确认进入【基础铺色阶段】吗？');
+            setAiSpeechSub('线稿层校对结束。是否允许开始在皮肤、头发、眼睛与服饰上铺基础色？说“确认”或“继续”。');
             setIsAwaitingConfirm(true);
             setPendingVerb('edit');
-            return 50;
+            return STAGE_BOUNDARIES.lineDone;
           }
-          // Check watercolor complete (85%)
-          if (prevProgress < 85 && nextProgress >= 85) {
+          // Check flats complete (70%)
+          if (prevProgress < STAGE_BOUNDARIES.flatsDone && nextProgress >= STAGE_BOUNDARIES.flatsDone) {
             clearInterval(paintTimerRef.current!);
             setSystemState('等待确认');
-            pushLog('ai', '🎨 [水彩晕染叠色已达成 85%] 块面渲染完毕。请问确认进入【最后的局部细节刻画层】雕饰瞳光和腮红吗？');
+            pushLog('ai', '🎨 [基础铺色阶段已达成 70%] 色块已经分层落位。请问确认进入【水彩晕染阶段】吗？');
+            setAiSpeechSub('基础色层完成。是否开始慢速水彩晕染，让颜料在纸纹上叠色扩散？说“确认”或“继续”。');
+            setIsAwaitingConfirm(true);
+            setPendingVerb('edit');
+            return STAGE_BOUNDARIES.flatsDone;
+          }
+          // Check watercolor complete (90%)
+          if (prevProgress < STAGE_BOUNDARIES.watercolorDone && nextProgress >= STAGE_BOUNDARIES.watercolorDone) {
+            clearInterval(paintTimerRef.current!);
+            setSystemState('等待确认');
+            pushLog('ai', '🎨 [水彩晕染叠色已达成 90%] 纸面颜料扩散完毕。请问确认进入【最后的局部细节刻画层】雕饰瞳光和腮红吗？');
             setAiSpeechSub('水彩层叠染完工。是否开始最后的【高光跟脸红细节】修饰？说“确认”或“继续”。');
             setIsAwaitingConfirm(true);
             setPendingVerb('edit');
-            return 85;
+            return STAGE_BOUNDARIES.watercolorDone;
           }
         }
 
@@ -744,7 +783,7 @@ export default function App() {
       // Complete avatar generation animation (0% to 100%)
       pushLog('system', '项目工程重建中... 草图及底片刷新。');
       pushLog('ai', '好的！这就为您动笔，我们将按照数位板绘画流程依序推进，请鉴赏画面的分层生长。');
-      setAiSpeechSub('正在依照标准数字工作台工序绘制：草图构型阶段(25%) -> 线稿描黑阶段(50%) -> 多重颜色浸润分色(85%) -> 动漫高光烘焙。');
+      setAiSpeechSub('正在依照标准数字工作台工序绘制：草图构型阶段(25%) -> 线稿描黑阶段(50%) -> 基础色分层(70%) -> 慢速水彩晕染(90%) -> 动漫高光烘焙。');
       startPaintingLoop(0); // Start from scratch!
       void persistProjectSnapshot({
         config: nextCharacterConfig,
@@ -779,6 +818,8 @@ export default function App() {
       // Local Component re-drafting:
       // Flash a quick segment-redraft (e.g. restarts from progress 65% up to 100% inside 1.5 seconds)
       // to aesthetically demonstrate the "local redrawing component" without touching others
+      const redrawTarget = operationPatch ? resolveRedrawTarget(operationPatch) : 'hair';
+      triggerRedrawPulse(redrawTarget);
       pushLog('system', '定位矢量图层，单独重写局部组件掩模。其他图层保持锁闭隔离。');
       pushLog('ai', '好的，局部重绘启动。将针对指定层重画。');
       setAiSpeechSub('已锁定头部及衣领等其余图层。正在对目标组件单独进行精描合成... 瞬间回填渲染完毕。');
@@ -870,6 +911,7 @@ export default function App() {
     const startsAutoPainting = operations.some((operation) => operation.type === 'start_auto_painting');
     const startsStagePainting = operations.some((operation) => operation.type === 'start_stage_painting');
     const redrawsComponent = operations.some((operation) => operation.type === 'redraw_component');
+    const redrawOperation = operations.find((operation) => operation.type === 'redraw_component');
 
     setCharacterConfig(nextConfig);
     setLayers(nextLayers);
@@ -907,6 +949,9 @@ export default function App() {
       startPaintingLoop(drawProgress);
     } else if (redrawsComponent) {
       pushLog('system', '后端 operations 已确认，启动局部组件重绘。');
+      if (redrawOperation?.type === 'redraw_component') {
+        triggerRedrawPulse(redrawOperation.target);
+      }
       startPaintingLoop(70);
     }
 
@@ -1007,10 +1052,21 @@ export default function App() {
 
     return [
       {
-        type: 'set_character',
+        type: 'redraw_component',
+        target: resolveRedrawTarget(nextConfig),
         patch: nextConfig
       }
     ];
+  };
+
+  const resolveRedrawTarget = (patch: Partial<CharacterConfig>): RedrawTarget => {
+    if (patch.hairColor || patch.hairLength || patch.gender) return 'hair';
+    if (patch.eyeColor) return 'eyes';
+    if (patch.expression) return 'expression';
+    if (patch.outfit) return 'outfit';
+    if (patch.accessory) return 'accessory';
+    if (patch.backgroundStyle) return 'background';
+    return 'hair';
   };
 
   const diffCharacterConfig = (
@@ -1487,11 +1543,13 @@ export default function App() {
                   setIsAwaitingConfirm(false);
                   setPendingConfig(null);
                   setPendingVerb(null);
+                  setPendingInterpretation(null);
                   setSystemState('等待指令');
                   setAiSpeechSub('好的，当前操作已取消，随时等候您的下一步指令。');
                   pushLog('ai', '已取消前面的操作。');
                 }}
                 isLightMode={isLightMode}
+                lastRedrawTarget={lastRedrawTarget}
               />
             </div>
 
