@@ -1,13 +1,15 @@
 import type {
   ApiProject,
   ApiSession,
+  AsrResponse,
   ConfirmCommandResponse,
   CommandInterpretation,
   InterpretCommandRequest,
   ProjectHistoryResponse,
   ProjectSnapshotRequest,
   ProjectSnapshotResponse,
-  ProjectUndoRedoResponse
+  ProjectUndoRedoResponse,
+  TtsResponse
 } from './types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4000/api/v1';
@@ -122,19 +124,66 @@ export async function rejectCommand(input: {
   });
 }
 
+export async function transcribeAudio(input: {
+  sessionId: string;
+  projectId: string;
+  audio: Blob;
+  locale?: string;
+  format?: 'webm' | 'wav' | 'mp3';
+}): Promise<AsrResponse> {
+  const form = new FormData();
+  form.append('sessionId', input.sessionId);
+  form.append('projectId', input.projectId);
+  form.append('locale', input.locale ?? 'zh-CN');
+  form.append('format', input.format ?? 'webm');
+  form.append('audio', input.audio, `voice.${input.format ?? 'webm'}`);
+
+  return apiRequest('/voice/asr', {
+    method: 'POST',
+    formData: form
+  });
+}
+
+export async function synthesizeSpeech(input: {
+  sessionId: string;
+  projectId?: string;
+  text: string;
+  voice?: string;
+  format?: 'mp3' | 'wav';
+}): Promise<TtsResponse> {
+  return apiRequest('/voice/tts', {
+    method: 'POST',
+    body: {
+      sessionId: input.sessionId,
+      projectId: input.projectId,
+      text: input.text,
+      voice: input.voice ?? 'gentle_female',
+      format: input.format ?? 'mp3'
+    }
+  });
+}
+
 async function apiRequest<T>(
   path: string,
   options: {
     method?: string;
     body?: unknown;
+    formData?: FormData;
   } = {}
 ): Promise<T> {
+  const isFormData = options.formData !== undefined;
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: options.method ?? 'GET',
-    headers: {
-      'content-type': 'application/json; charset=utf-8'
-    },
-    body: options.body === undefined ? undefined : JSON.stringify(options.body)
+    headers: isFormData
+      ? undefined
+      : {
+          'content-type': 'application/json; charset=utf-8'
+        },
+    body: isFormData
+      ? options.formData
+      : options.body === undefined
+      ? undefined
+      : JSON.stringify(options.body)
   });
 
   const payload = await response.json().catch(() => null);

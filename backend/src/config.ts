@@ -81,6 +81,15 @@ export const appConfig = {
     provider: readParserProvider(),
     timeoutMs: readPositiveInteger("OPENAI_COMPATIBLE_TIMEOUT_MS", 8000),
     costLog: readBoolean("PARSER_COST_LOG", false)
+  },
+  voice: {
+    dashscopeApiKey: readOptional("DASHSCOPE_API_KEY"),
+    asrModel: readOptional("DASHSCOPE_ASR_MODEL") ?? "qwen3-asr-flash",
+    ttsModel: readOptional("DASHSCOPE_TTS_MODEL") ?? "qwen3-tts-flash",
+    asrTimeoutMs: readPositiveInteger("VOICE_ASR_TIMEOUT_MS", 15000),
+    ttsTimeoutMs: readPositiveInteger("VOICE_TTS_TIMEOUT_MS", 15000),
+    maxAudioMb: readPositiveInteger("VOICE_MAX_AUDIO_MB", 10),
+    maxTtsChars: readPositiveInteger("VOICE_MAX_TTS_CHARS", 300)
   }
 } as const;
 

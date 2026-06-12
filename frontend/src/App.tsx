@@ -34,6 +34,8 @@ import {
   interpretCommand,
   redoProject,
   saveProjectSnapshot,
+  synthesizeSpeech,
+  transcribeAudio,
   undoProject
 } from './api/client';
 import type { CommandInterpretation, DrawingOperation, ProjectHistoryEntry } from './api/types';
@@ -104,6 +106,10 @@ export default function App() {
   const [isListening, setIsListening] = useState<boolean>(false);
   const [micError, setMicError] = useState<string | null>(null);
   const recognitionRef = useRef<any>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaChunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+  const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // Painting drawing loop timer ref
   const paintTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -125,6 +131,47 @@ export default function App() {
       text,
     };
     setVoiceLogs((prev) => [newLog, ...prev]);
+  };
+
+  const playAssistantSpeech = async (text: string) => {
+    if (!sessionId || !projectId || !text.trim()) {
+      return;
+    }
+
+    try {
+      const audio = await synthesizeSpeech({
+        sessionId,
+        projectId,
+        text: text.slice(0, 300),
+        voice: 'gentle_female',
+        format: 'mp3'
+      });
+      const source = audio.audioUrl
+        ? toAbsoluteApiAssetUrl(audio.audioUrl)
+        : audio.audioBase64 && audio.mimeType
+        ? `data:${audio.mimeType};base64,${audio.audioBase64}`
+        : undefined;
+      if (!source) {
+        return;
+      }
+
+      ttsAudioRef.current?.pause();
+      const player = new Audio(source);
+      ttsAudioRef.current = player;
+      await player.play();
+    } catch (error) {
+      console.warn('TTS failed; subtitle fallback remains active.', error);
+      pushLog('system', '语音服务不可用，已切换字幕模式。');
+    }
+  };
+
+  const toAbsoluteApiAssetUrl = (url: string) => {
+    if (/^https?:\/\//.test(url)) {
+      return url;
+    }
+
+    const apiBase = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4000/api/v1';
+    return `${apiBase.replace(/\/api\/v1\/?$/, '')}${url}`;
   };
 
   const applyProjectState = (project: {
@@ -403,6 +450,7 @@ export default function App() {
         setSystemState('等待指令');
         setAiSpeechSub(interpretation.aiReplyText);
         pushLog('ai', interpretation.aiReplyText);
+        void playAssistantSpeech(interpretation.aiReplyText);
         return;
       }
 
@@ -412,6 +460,7 @@ export default function App() {
       setIsAwaitingConfirm(interpretation.requiresConfirmation);
       setAiSpeechSub(interpretation.aiReplyText);
       pushLog('ai', interpretation.aiReplyText);
+      void playAssistantSpeech(interpretation.aiReplyText);
       setSystemState(interpretation.requiresConfirmation ? '等待确认' : '等待指令');
 
       if (!interpretation.requiresConfirmation) {
@@ -660,6 +709,7 @@ export default function App() {
         setPendingVerb(null);
         setPendingInterpretation(null);
         setAiSpeechSub(confirmed.aiReplyText);
+        void playAssistantSpeech(confirmed.aiReplyText);
 
         await applyConfirmedOperations(confirmed.operations, {
           transcript: pendingInterpretation.transcript,
@@ -1186,27 +1236,101 @@ export default function App() {
   };
 
   // -------------------------------------------------------------------------
-  // 7. WEB SPEECH API REAL INTERACTION HANDLING
+  // 7. REAL VOICE HANDLING WITH DASHSCOPE ASR AND WEB SPEECH FALLBACK
   // -------------------------------------------------------------------------
-  const toggleSpeechRecognition = () => {
+  const toggleSpeechRecognition = async () => {
     if (isListening) {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+        return;
+      }
       if (recognitionRef.current) {
         recognitionRef.current.stop();
       }
       setIsListening(false);
       pushLog('system', '麦克风监听关闭。');
     } else {
-      if (!SpeechRecognitionAPI) {
-        setMicError('您的浏览器未对 Web Speech API 进行完整适配。建议直接使用右侧极速卡片触发，或使用 Chrome 浏览器。');
-        pushLog('system', '⚠️ Speech API 不支持（已启动纯拟真交互方案）。');
-        // Instantly simulate user speech text placeholder to give visual action feedback
-        setIsListening(true);
-        setTimeout(() => {
-          setIsListening(false);
-          interpretVoiceCommand('画一个蓝色长发的二次元女生半身头像，水彩素描风');
-        }, 3000);
+      if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+        startWebSpeechFallback();
         return;
       }
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        streamRef.current = stream;
+        mediaChunksRef.current = [];
+        const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+        const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+        mediaRecorderRef.current = recorder;
+
+        recorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            mediaChunksRef.current.push(event.data);
+          }
+        };
+
+        recorder.onstop = () => {
+          const blob = new Blob(mediaChunksRef.current, { type: mimeType || 'audio/webm' });
+          mediaChunksRef.current = [];
+          streamRef.current?.getTracks().forEach((track) => track.stop());
+          streamRef.current = null;
+          mediaRecorderRef.current = null;
+          setIsListening(false);
+          void handleRecordedAudio(blob);
+        };
+
+        setMicError(null);
+        setIsListening(true);
+        setSystemState('聆听中');
+        setUserSpeechSub('正在录入您的普通话...');
+        pushLog('system', '🎙️ 麦克风已捕获，使用后端 ASR 录音中。再次点击结束。');
+        recorder.start();
+      } catch (error) {
+        console.warn('MediaRecorder unavailable; falling back to Web Speech.', error);
+        startWebSpeechFallback();
+      }
+    }
+  };
+
+  const handleRecordedAudio = async (audio: Blob) => {
+    if (!sessionId || !projectId) {
+      startWebSpeechFallback();
+      return;
+    }
+
+    try {
+      setSystemState('思考中');
+      setUserSpeechSub('正在识别语音...');
+      pushLog('system', '正在上传录音到后端 ASR 服务...');
+      const result = await transcribeAudio({
+        sessionId,
+        projectId,
+        audio,
+        locale: 'zh-CN',
+        format: 'webm'
+      });
+      pushLog('system', `ASR 识别完成：${result.transcript}`);
+      setUserSpeechSub(result.transcript);
+      setSystemState('思考中');
+      await interpretVoiceCommand(result.transcript);
+    } catch (error) {
+      console.warn('ASR failed; falling back to Web Speech.', error);
+      pushLog('system', '语音服务不可用，已切换浏览器 Web Speech fallback。');
+      startWebSpeechFallback();
+    }
+  };
+
+  const startWebSpeechFallback = () => {
+    if (!SpeechRecognitionAPI) {
+      setMicError('您的浏览器未对 Web Speech API 进行完整适配。建议直接使用右侧极速卡片触发，或使用 Chrome 浏览器。');
+      pushLog('system', '⚠️ Speech API 不支持（已启动纯拟真交互方案）。');
+      setIsListening(true);
+      setTimeout(() => {
+        setIsListening(false);
+        interpretVoiceCommand('画一个蓝色长发的二次元女生半身头像，水彩素描风');
+      }, 3000);
+      return;
+    }
 
       setMicError(null);
       setIsListening(true);
@@ -1244,7 +1368,6 @@ export default function App() {
 
       recognitionRef.current = r;
       r.start();
-    }
   };
 
   return (

@@ -135,3 +135,19 @@ export interface ConfirmCommandResponse {
   operations: DrawingOperation[];
   serverRevision: number;
 }
+
+export interface AsrResponse {
+  transcript: string;
+  confidence: number;
+  durationMs: number;
+  provider: 'dashscope';
+  rawProviderRequestId?: string;
+}
+
+export interface TtsResponse {
+  audioUrl?: string;
+  audioBase64?: string;
+  mimeType?: string;
+  durationMs: number;
+  provider: 'dashscope';
+}

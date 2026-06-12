@@ -4,6 +4,7 @@ import path from "node:path";
 import { appConfig } from "../config.js";
 import { ApiError } from "../errors.js";
 import { isSafeId } from "./ids.js";
+import { ensureAudioStorageReady } from "../voice/audioStore.js";
 
 export type StoreCollection = "sessions" | "projects" | "interpretations" | "history";
 
@@ -12,7 +13,8 @@ export async function ensureStorageReady(): Promise<void> {
     fs.mkdir(collectionDir("sessions"), { recursive: true }),
     fs.mkdir(collectionDir("projects"), { recursive: true }),
     fs.mkdir(collectionDir("interpretations"), { recursive: true }),
-    fs.mkdir(collectionDir("history"), { recursive: true })
+    fs.mkdir(collectionDir("history"), { recursive: true }),
+    ensureAudioStorageReady()
   ]);
 }
 
