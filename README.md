@@ -71,6 +71,7 @@ MVP 聚焦一个可控主题：
 ├── docs/                        # PRD、设计文档、架构说明、启动说明
 ├── frontend/                    # 前端绘图工作台
 ├── .github/                     # PR 模板
+├── AGENTS.md                    # 仓库协作与 Git 操作规则
 ├── .env.example                 # 环境变量示例
 ├── .gitignore
 ├── competition-requirements.md  # 比赛工程规范与提交要求
@@ -80,7 +81,7 @@ MVP 聚焦一个可控主题：
 
 ## 当前实现状态
 
-当前仓库已经包含前端绘图工作台原型。前端可以本地启动，用于演示语音入口、确认流、绘图阶段、图层面板和本地 mock 指令解析。
+当前仓库已经包含前端绘图工作台原型和后端最小 API 服务。前端可以本地启动，用于演示语音入口、确认流、绘图阶段、图层面板和本地 mock 指令解析。后端提供会话、工程和文本指令解析接口，为后续前端接入真实 API 打基础。
 
 已包含：
 
@@ -95,13 +96,15 @@ MVP 聚焦一个可控主题：
 - 比赛规范 checklist
 - PRD 文档
 - 前端 Vite + React 工作台原型
+- 后端 Node.js 最小 API 服务
+- 本地规则版语音指令解析
+- 仓库协作与 Git 操作规则
 
 暂未包含：
 
-- 可运行后端服务
 - ASR/TTS 接入
 - LLM 指令解析接入
-- 工程持久化实现
+- 工程文件持久化实现
 
 ## 启动说明
 
@@ -119,12 +122,24 @@ npm run dev
 http://localhost:3000
 ```
 
-后端仍在计划阶段，后续将按 API 合约补充：
+后端 API 服务当前可以本地启动：
 
 ```bash
 cd backend
 npm install
 npm run dev
+```
+
+默认开发地址：
+
+```text
+http://localhost:8787
+```
+
+健康检查：
+
+```text
+http://localhost:8787/api/v1/health
 ```
 
 更多说明见 [docs/startup.md](docs/startup.md)。
