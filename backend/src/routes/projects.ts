@@ -14,6 +14,7 @@ import type { ProjectHistoryEntry } from "../types/history.js";
 import type { StoredProject } from "../types/project.js";
 
 export const projectsRouter = Router();
+const projectQueues = new Map<string, Promise<unknown>>();
 
 projectsRouter.post(
   "/",
@@ -63,6 +64,13 @@ projectsRouter.get(
   "/:projectId",
   asyncHandler(async (req, res) => {
     const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : undefined;
+    if (!sessionId) {
+      throw new ApiError({
+        statusCode: 400,
+        code: "REQUEST_INVALID",
+        message: "读取工程需要提供 sessionId。"
+      });
+    }
 
     const project = await getProject(req.params.projectId);
     if (!project) {
@@ -73,13 +81,7 @@ projectsRouter.get(
       });
     }
 
-    if (sessionId && project.sessionId !== sessionId) {
-      throw new ApiError({
-        statusCode: 404,
-        code: "SESSION_PROJECT_MISMATCH",
-        message: "工程不属于当前会话。"
-      });
-    }
+    assertProjectSession(project, sessionId);
 
     res.json(toProjectResponse(project, true));
   })
@@ -93,40 +95,44 @@ projectsRouter.put(
       throw validationError(parsed.error);
     }
 
-    const project = await loadProjectOrThrow(req.params.projectId);
+    const result = await withProjectQueue(req.params.projectId, async () => {
+      const project = await loadProjectOrThrow(req.params.projectId);
 
-    assertProjectSession(project, parsed.data.sessionId);
+      assertProjectSession(project, parsed.data.sessionId);
 
-    if (project.serverRevision !== parsed.data.clientRevision) {
-      throwRevisionConflict(project);
-    }
+      if (project.serverRevision !== parsed.data.clientRevision) {
+        throwRevisionConflict(project);
+      }
 
-    const before = projectToHistoryState(project);
-    const updated = await saveSnapshot(project, parsed.data);
-    const after = projectToHistoryState(updated);
+      const before = projectToHistoryState(project);
+      const updated = await saveSnapshot(project, parsed.data);
+      const after = projectToHistoryState(updated);
 
-    if (hasStateChanged(before, after)) {
-      const history = await appendProjectHistory(updated.projectId, {
-        sessionId: updated.sessionId,
-        kind: parsed.data.historyMeta?.kind ?? "snapshot",
-        transcript: parsed.data.historyMeta?.transcript,
-        aiReplyText: parsed.data.historyMeta?.aiReplyText,
-        confirmed: parsed.data.historyMeta?.kind === "command" ? true : undefined,
-        operations: (parsed.data.historyMeta?.operations ?? []) as ProjectHistoryEntry["operations"],
-        before,
-        after
-      });
-      updated.historyCount = history.undoStack.length;
-      await saveProject(updated);
-    }
+      if (hasStateChanged(before, after)) {
+        const history = await appendProjectHistory(updated.projectId, {
+          sessionId: updated.sessionId,
+          kind: parsed.data.historyMeta?.kind ?? "snapshot",
+          transcript: parsed.data.historyMeta?.transcript,
+          aiReplyText: parsed.data.historyMeta?.aiReplyText,
+          confirmed: parsed.data.historyMeta?.kind === "command" ? true : undefined,
+          operations: (parsed.data.historyMeta?.operations ?? []) as ProjectHistoryEntry["operations"],
+          before,
+          after
+        });
+        updated.historyCount = history.undoStack.length;
+        await saveProject(updated);
+      }
 
-    res.json({
-      projectId: updated.projectId,
-      serverRevision: updated.serverRevision,
-      historyCount: updated.historyCount,
-      redoCount: 0,
-      savedAt: updated.updatedAt
+      return {
+        projectId: updated.projectId,
+        serverRevision: updated.serverRevision,
+        historyCount: updated.historyCount,
+        redoCount: 0,
+        savedAt: updated.updatedAt
+      };
     });
+
+    res.json(result);
   })
 );
 
@@ -138,31 +144,35 @@ projectsRouter.post(
       throw validationError(parsed.error);
     }
 
-    const project = await loadProjectOrThrow(req.params.projectId);
-    assertProjectSession(project, parsed.data.sessionId);
-    if (project.serverRevision !== parsed.data.currentRevision) {
-      throwRevisionConflict(project);
-    }
+    const result = await withProjectQueue(req.params.projectId, async () => {
+      const project = await loadProjectOrThrow(req.params.projectId);
+      assertProjectSession(project, parsed.data.sessionId);
+      if (project.serverRevision !== parsed.data.currentRevision) {
+        throwRevisionConflict(project);
+      }
 
-    const history = await getProjectHistory(project.projectId);
-    const entry = history.undoStack.pop();
-    if (!entry) {
-      throw new ApiError({
-        statusCode: 409,
-        code: "NO_UNDO_AVAILABLE",
-        message: "没有可撤销的历史。"
-      });
-    }
+      const history = await getProjectHistory(project.projectId);
+      const entry = history.undoStack.pop();
+      if (!entry) {
+        throw new ApiError({
+          statusCode: 409,
+          code: "NO_UNDO_AVAILABLE",
+          message: "没有可撤销的历史。"
+        });
+      }
 
-    history.redoStack.push(entry);
-    const updated = await restoreProjectState(project, entry.before, history.undoStack.length);
-    await saveProjectHistory(history);
+      history.redoStack.push(entry);
+      const updated = await restoreProjectState(project, entry.before, history.undoStack.length);
+      await saveProjectHistory(history);
 
-    res.json({
-      ...toProjectResponse(updated, true),
-      redoCount: history.redoStack.length,
-      aiReplyText: "已撤销上一步修改。"
+      return {
+        ...toProjectResponse(updated, true),
+        redoCount: history.redoStack.length,
+        aiReplyText: "已撤销上一步修改。"
+      };
     });
+
+    res.json(result);
   })
 );
 
@@ -174,33 +184,51 @@ projectsRouter.post(
       throw validationError(parsed.error);
     }
 
-    const project = await loadProjectOrThrow(req.params.projectId);
-    assertProjectSession(project, parsed.data.sessionId);
-    if (project.serverRevision !== parsed.data.currentRevision) {
-      throwRevisionConflict(project);
-    }
+    const result = await withProjectQueue(req.params.projectId, async () => {
+      const project = await loadProjectOrThrow(req.params.projectId);
+      assertProjectSession(project, parsed.data.sessionId);
+      if (project.serverRevision !== parsed.data.currentRevision) {
+        throwRevisionConflict(project);
+      }
 
-    const history = await getProjectHistory(project.projectId);
-    const entry = history.redoStack.pop();
-    if (!entry) {
-      throw new ApiError({
-        statusCode: 409,
-        code: "NO_REDO_AVAILABLE",
-        message: "没有可重做的历史。"
-      });
-    }
+      const history = await getProjectHistory(project.projectId);
+      const entry = history.redoStack.pop();
+      if (!entry) {
+        throw new ApiError({
+          statusCode: 409,
+          code: "NO_REDO_AVAILABLE",
+          message: "没有可重做的历史。"
+        });
+      }
 
-    history.undoStack.push(entry);
-    const updated = await restoreProjectState(project, entry.after, history.undoStack.length);
-    await saveProjectHistory(history);
+      history.undoStack.push(entry);
+      const updated = await restoreProjectState(project, entry.after, history.undoStack.length);
+      await saveProjectHistory(history);
 
-    res.json({
-      ...toProjectResponse(updated, true),
-      redoCount: history.redoStack.length,
-      aiReplyText: "已重新执行上一项被撤回的绘画工序。"
+      return {
+        ...toProjectResponse(updated, true),
+        redoCount: history.redoStack.length,
+        aiReplyText: "已重新执行上一项被撤回的绘画工序。"
+      };
     });
+
+    res.json(result);
   })
 );
+
+async function withProjectQueue<T>(projectId: string, operation: () => Promise<T>): Promise<T> {
+  const previous = projectQueues.get(projectId) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(operation);
+  projectQueues.set(projectId, current);
+
+  try {
+    return await current;
+  } finally {
+    if (projectQueues.get(projectId) === current) {
+      projectQueues.delete(projectId);
+    }
+  }
+}
 
 function toProjectResponse(project: Awaited<ReturnType<typeof getProject>>, includeHistory: boolean) {
   if (!project) {

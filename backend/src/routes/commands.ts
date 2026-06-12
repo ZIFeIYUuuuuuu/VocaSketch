@@ -73,6 +73,8 @@ commandsRouter.post(
       });
     }
 
+    assertInterpretationUnresolved(interpretation);
+
     const confirmed = parsed.data.confirmed ?? true;
     await saveInterpretation({
       ...interpretation,
@@ -109,16 +111,15 @@ commandsRouter.post(
       });
     }
 
-    if (
-      (parsed.data.sessionId && interpretation.sessionId !== parsed.data.sessionId) ||
-      (parsed.data.projectId && interpretation.projectId !== parsed.data.projectId)
-    ) {
+    if (interpretation.sessionId !== parsed.data.sessionId || interpretation.projectId !== parsed.data.projectId) {
       throw new ApiError({
         statusCode: 404,
         code: "CONFIRMATION_EXPIRED",
         message: "确认记录不存在或已过期。"
       });
     }
+
+    assertInterpretationUnresolved(interpretation);
 
     await saveInterpretation({
       ...interpretation,
@@ -134,3 +135,13 @@ commandsRouter.post(
     });
   })
 );
+
+function assertInterpretationUnresolved(interpretation: StoredInterpretation) {
+  if (interpretation.confirmedAt || interpretation.rejectedAt) {
+    throw new ApiError({
+      statusCode: 409,
+      code: "CONFIRMATION_ALREADY_RESOLVED",
+      message: "该确认记录已处理，不能重复确认或取消。"
+    });
+  }
+}
