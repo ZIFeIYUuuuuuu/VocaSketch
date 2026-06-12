@@ -237,7 +237,13 @@ Request:
   "drawProgress": 100,
   "currentStage": "已完成",
   "canvasObjects": [],
-  "clientRevision": 8
+  "clientRevision": 8,
+  "historyMeta": {
+    "kind": "command",
+    "transcript": "把眼睛改成紫色",
+    "aiReplyText": "我会把眼睛改成紫色，确认吗？",
+    "operations": []
+  }
 }
 ```
 
@@ -247,6 +253,8 @@ Response:
 {
   "projectId": "proj_01J...",
   "serverRevision": 9,
+  "historyCount": 6,
+  "redoCount": 0,
   "savedAt": "2026-06-12T02:06:00.000Z"
 }
 ```
@@ -544,9 +552,13 @@ Response:
             "eyeColor": "purple"
           }
         }
-      ]
+      ],
+      "currentStage": "已完成",
+      "drawProgress": 100
     }
-  ]
+  ],
+  "undoCount": 3,
+  "redoCount": 1
 }
 ```
 
@@ -573,6 +585,8 @@ Response:
   "drawProgress": 100,
   "currentStage": "已完成",
   "serverRevision": 10,
+  "historyCount": 2,
+  "redoCount": 1,
   "aiReplyText": "已撤销上一步修改。"
 }
 ```

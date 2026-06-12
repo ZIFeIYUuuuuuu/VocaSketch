@@ -25,10 +25,25 @@ import { StatusIndicator } from './components/StatusIndicator';
 import { VoiceController } from './components/VoiceController';
 import { DemoScriptPanel } from './components/DemoScriptPanel';
 import { CharacterConfig, DrawStage, PaintLayer, SystemState, VoiceLog } from './types';
+import {
+  confirmCommand,
+  createProject,
+  createSession,
+  getProject,
+  getProjectHistory,
+  interpretCommand,
+  redoProject,
+  saveProjectSnapshot,
+  undoProject
+} from './api/client';
+import type { CommandInterpretation, DrawingOperation, ProjectHistoryEntry } from './api/types';
 
 // Web Speech SpeechRecognition typed definition helper
 const SpeechRecognitionAPI =
   (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+const SESSION_STORAGE_KEY = 'vocasketch.sessionId';
+const PROJECT_STORAGE_KEY = 'vocasketch.projectId';
 
 export default function App() {
   // -------------------------------------------------------------------------
@@ -53,6 +68,7 @@ export default function App() {
   const [pendingConfig, setPendingConfig] = useState<Partial<CharacterConfig> | null>(null);
   const [isAwaitingConfirm, setIsAwaitingConfirm] = useState<boolean>(false);
   const [pendingVerb, setPendingVerb] = useState<'create' | 'edit' | 'accessory' | null>(null);
+  const [pendingInterpretation, setPendingInterpretation] = useState<CommandInterpretation | null>(null);
 
   // Layout Layers state
   const [layers, setLayers] = useState<PaintLayer[]>([
@@ -67,6 +83,11 @@ export default function App() {
   // Operational undo/redo history tracks
   const [history, setHistory] = useState<CharacterConfig[]>([]);
   const [redoStack, setRedoStack] = useState<CharacterConfig[]>([]);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [serverRevision, setServerRevision] = useState<number | null>(null);
+  const [historyCount, setHistoryCount] = useState<number>(0);
+  const [redoCount, setRedoCount] = useState<number>(0);
 
   // State Machine control vectors
   const [drawProgress, setDrawProgress] = useState<number>(0);
@@ -105,11 +126,98 @@ export default function App() {
     setVoiceLogs((prev) => [newLog, ...prev]);
   };
 
+  const applyProjectState = (project: {
+    projectId: string;
+    sessionId: string;
+    config: CharacterConfig;
+    layers: PaintLayer[];
+    drawProgress: number;
+    currentStage: DrawStage;
+    serverRevision: number;
+    historyCount?: number;
+  }) => {
+    setSessionId(project.sessionId);
+    setProjectId(project.projectId);
+    setCharacterConfig(project.config);
+    setLayers(project.layers);
+    setDrawProgress(project.drawProgress);
+    setCurrentStage(project.currentStage);
+    setServerRevision(project.serverRevision);
+    setHistoryCount(project.historyCount ?? 0);
+  };
+
   // Push welcome instructions on load
   useEffect(() => {
     pushLog('system', '🎨 AI 语音数位绘画工作台控制引擎就绪。');
     pushLog('system', '您可以开启麦克风或点击右侧【快捷剧本模拟】体验高精绘图。');
     pushLog('ai', '您好，我是您的数位绘画助理。说出指令如“画一个蓝色长发女生半身像，水彩素描风”，我们即可开始创作！');
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const bootstrapProject = async () => {
+      const savedSessionId = localStorage.getItem(SESSION_STORAGE_KEY);
+      const savedProjectId = localStorage.getItem(PROJECT_STORAGE_KEY);
+
+      if (savedSessionId && savedProjectId) {
+        try {
+          const project = await getProject({
+            projectId: savedProjectId,
+            sessionId: savedSessionId
+          });
+          if (cancelled) return;
+
+          applyProjectState(project);
+          localStorage.setItem(SESSION_STORAGE_KEY, project.sessionId);
+          localStorage.setItem(PROJECT_STORAGE_KEY, project.projectId);
+
+          const historyState = await getProjectHistory({
+            projectId: project.projectId,
+            sessionId: project.sessionId,
+            limit: 50
+          });
+          if (cancelled) return;
+
+          setHistoryCount(historyState.undoCount);
+          setRedoCount(historyState.redoCount);
+          pushLog('system', `已从后端恢复工程 ${project.projectId}，历史 ${historyState.undoCount} 步。`);
+          return;
+        } catch (error) {
+          console.warn('Project restore failed, creating a new demo project.', error);
+          localStorage.removeItem(SESSION_STORAGE_KEY);
+          localStorage.removeItem(PROJECT_STORAGE_KEY);
+        }
+      }
+
+      try {
+        const session = await createSession({
+          clientId: `browser-${crypto.randomUUID?.() ?? Date.now().toString(36)}`,
+          locale: 'zh-CN'
+        });
+        const project = await createProject({
+          sessionId: session.sessionId,
+          title: '未命名语音头像',
+          initialConfig: characterConfig
+        });
+        if (cancelled) return;
+
+        localStorage.setItem(SESSION_STORAGE_KEY, session.sessionId);
+        localStorage.setItem(PROJECT_STORAGE_KEY, project.projectId);
+        applyProjectState(project);
+        setRedoCount(0);
+        pushLog('system', `后端匿名工程已创建：${project.projectId}`);
+      } catch (error) {
+        console.warn('Backend bootstrap failed; local fallback remains available.', error);
+        pushLog('system', '后端暂不可用，已进入本地内存 fallback 模式。');
+      }
+    };
+
+    void bootstrapProject();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Sync canvas progress with Stage Enum
@@ -201,7 +309,120 @@ export default function App() {
   // -------------------------------------------------------------------------
   // 4. CLIENT NLP INTERPRETATION STATE-MACHINE (本地语音语义理解状态机)
   // -------------------------------------------------------------------------
-  const interpretVoiceCommand = (rawText: string) => {
+  const interpretVoiceCommand = async (rawText: string) => {
+    const text = rawText.trim();
+    if (!text) return;
+
+    if (/确定|确认|ok|好的|开始|没错|绘制|可以/.test(text) && isAwaitingConfirm) {
+      pushLog('user', text);
+      setUserSpeechSub(text);
+      await handleConfirmAction();
+      return;
+    }
+
+    if (/取消|放弃|不要了|不画了|不对|不对劲|错了/.test(text)) {
+      pushLog('user', text);
+      setIsAwaitingConfirm(false);
+      setPendingConfig(null);
+      setPendingVerb(null);
+      setPendingInterpretation(null);
+      setSystemState('等待指令');
+      setUserSpeechSub(text);
+      setAiSpeechSub('好的，已撤销当前的待办指令，随时为您待命。');
+      pushLog('ai', '已为您撤销前面的操作。');
+      return;
+    }
+
+    if (/暂停|停一下|先停/.test(text)) {
+      pushLog('user', text);
+      setUserSpeechSub(text);
+      handlePauseResume(true);
+      return;
+    }
+
+    if (/继续|接着/.test(text)) {
+      pushLog('user', text);
+      setUserSpeechSub(text);
+      handlePauseResume(false);
+      return;
+    }
+
+    if (/回放|重新放|重演/.test(text)) {
+      pushLog('user', text);
+      setUserSpeechSub(text);
+      await handleReplay();
+      return;
+    }
+
+    if (/撤销|上一步|撤消/.test(text)) {
+      pushLog('user', text);
+      setUserSpeechSub(text);
+      await handleUndo();
+      return;
+    }
+
+    if (/重做|恢复下一步|前进/.test(text)) {
+      pushLog('user', text);
+      setUserSpeechSub(text);
+      await handleRedo();
+      return;
+    }
+
+    if (!projectId || !sessionId) {
+      interpretVoiceCommandLocally(text);
+      return;
+    }
+
+    pushLog('user', text);
+    setUserSpeechSub(text);
+    setSystemState('思考中');
+
+    try {
+      const interpretation = await interpretCommand({
+        sessionId,
+        projectId,
+        clientCommandId: `cmd_${Date.now().toString(36)}`,
+        text,
+        currentState: {
+          systemState,
+          currentStage,
+          drawProgress,
+          paintMode,
+          config: characterConfig,
+          layers
+        }
+      });
+
+      if (interpretation.needsClarification || interpretation.operations.length === 0) {
+        setSystemState('等待指令');
+        setAiSpeechSub(interpretation.aiReplyText);
+        pushLog('ai', interpretation.aiReplyText);
+        return;
+      }
+
+      setPendingInterpretation(interpretation);
+      setPendingConfig(resolveConfigFromOperations(interpretation.operations));
+      setPendingVerb(interpretation.intent === 'create_avatar' ? 'create' : 'edit');
+      setIsAwaitingConfirm(interpretation.requiresConfirmation);
+      setAiSpeechSub(interpretation.aiReplyText);
+      pushLog('ai', interpretation.aiReplyText);
+      setSystemState(interpretation.requiresConfirmation ? '等待确认' : '等待指令');
+
+      if (!interpretation.requiresConfirmation) {
+        await applyConfirmedOperations(interpretation.operations, {
+          transcript: interpretation.transcript,
+          aiReplyText: interpretation.aiReplyText,
+          persist: false
+        });
+      }
+    } catch (error) {
+      console.warn('Backend command interpretation failed; falling back to local parser.', error);
+      pushLog('system', '后端指令解析暂不可用，切回本地语义解析。');
+      interpretVoiceCommandLocally(text);
+    }
+  };
+
+  const interpretVoiceCommandLocally = (rawText: string) => {
     const text = rawText.trim();
     if (!text) return;
 
@@ -226,6 +447,7 @@ export default function App() {
         setIsAwaitingConfirm(false);
         setPendingConfig(null);
         setPendingVerb(null);
+        setPendingInterpretation(null);
         setSystemState('等待指令');
         setUserSpeechSub(text);
         setAiSpeechSub('好的，已撤销当前的待办指令，随时为您待命。');
@@ -383,6 +605,7 @@ export default function App() {
 
       // Store what we computed and ask user to confirm (P0 Req: Awaiting voice repetition/affirmation)
       setPendingConfig(nextConfig);
+      setPendingInterpretation(null);
       setIsAwaitingConfirm(true);
 
       if (isCreation) {
@@ -403,7 +626,7 @@ export default function App() {
   // -------------------------------------------------------------------------
   // 5. DECISION ENGINE - CONFIRMS & DEVIATIONS
   // -------------------------------------------------------------------------
-  const handleConfirmAction = () => {
+  const handleConfirmAction = async () => {
     if (!isAwaitingConfirm) return;
 
     // Backup current traits to Undo history prior to execution
@@ -412,14 +635,53 @@ export default function App() {
 
     const verb = pendingVerb;
     const nextCfg = pendingConfig;
+    const confirmedTranscript = userSpeechSub;
+    const confirmedReplyText = aiSpeechSub;
+
+    if (pendingInterpretation && projectId && sessionId) {
+      try {
+        const confirmed = await confirmCommand({
+          interpretationId: pendingInterpretation.interpretationId,
+          sessionId,
+          projectId,
+          confirmed: true,
+          confirmationText: confirmedTranscript || '确认',
+          currentRevision: serverRevision ?? undefined
+        });
+
+        setIsAwaitingConfirm(false);
+        setPendingConfig(null);
+        setPendingVerb(null);
+        setPendingInterpretation(null);
+        setAiSpeechSub(confirmed.aiReplyText);
+
+        await applyConfirmedOperations(confirmed.operations, {
+          transcript: pendingInterpretation.transcript,
+          aiReplyText: pendingInterpretation.aiReplyText,
+          persist: true
+        });
+        return;
+      } catch (error) {
+        console.warn('Backend confirmation failed; falling back to local pending state.', error);
+        pushLog('system', '后端确认记录不可用，切回本地确认执行。');
+      }
+    }
+
+    const nextCharacterConfig = nextCfg ? ({ ...characterConfig, ...nextCfg } as CharacterConfig) : characterConfig;
+    const operationPatch = nextCfg ? diffCharacterConfig(characterConfig, nextCharacterConfig) : null;
+    const operations = operationsForConfirmedCommand(
+      verb,
+      verb === 'create' ? nextCharacterConfig : operationPatch
+    );
 
     setIsAwaitingConfirm(false);
     setPendingConfig(null);
     setPendingVerb(null);
+    setPendingInterpretation(null);
 
     // Apply the traits
     if (nextCfg) {
-      setCharacterConfig(nextCfg as CharacterConfig);
+      setCharacterConfig(nextCharacterConfig);
     }
 
     if (verb === 'create') {
@@ -428,12 +690,35 @@ export default function App() {
       pushLog('ai', '好的！这就为您动笔，我们将按照数位板绘画流程依序推进，请鉴赏画面的分层生长。');
       setAiSpeechSub('正在依照标准数字工作台工序绘制：草图构型阶段(25%) -> 线稿描黑阶段(50%) -> 多重颜色浸润分色(85%) -> 动漫高光烘焙。');
       startPaintingLoop(0); // Start from scratch!
+      void persistProjectSnapshot({
+        config: nextCharacterConfig,
+        layers,
+        drawProgress: 100,
+        currentStage: '已完成',
+        transcript: confirmedTranscript,
+        aiReplyText: confirmedReplyText,
+        operations
+      });
     } else if (paintMode === 'stages' && drawProgress > 0 && drawProgress < 100) {
       // Midpoint step resume: continues standard drawing stages
       pushLog('system', '单步授权通过，开始调度渲染下一层绘画组件群。');
       pushLog('ai', '好的，继续落笔。请查阅下一阶段的线条叠放。');
       setAiSpeechSub('单步授权成功。正在继续载载，请欣赏下个工序。');
       startPaintingLoop(drawProgress);
+      void persistProjectSnapshot({
+        config: nextCharacterConfig,
+        layers,
+        drawProgress: Math.min(100, drawProgress),
+        currentStage,
+        transcript: confirmedTranscript || '分阶段确认',
+        aiReplyText: confirmedReplyText,
+        operations: [
+          {
+            type: 'start_stage_painting',
+            fromStage: currentStage
+          }
+        ]
+      });
     } else {
       // Local Component re-drafting:
       // Flash a quick segment-redraft (e.g. restarts from progress 65% up to 100% inside 1.5 seconds)
@@ -444,6 +729,15 @@ export default function App() {
 
       // Let's do a fast 65% -> 100% segment animation of the local edit
       startPaintingLoop(70);
+      void persistProjectSnapshot({
+        config: nextCharacterConfig,
+        layers,
+        drawProgress: 100,
+        currentStage: '已完成',
+        transcript: confirmedTranscript,
+        aiReplyText: confirmedReplyText,
+        operations
+      });
     }
   };
 
@@ -467,7 +761,221 @@ export default function App() {
     }
   };
 
-  const handleUndo = () => {
+  const persistProjectSnapshot = async (snapshot: {
+    config: CharacterConfig;
+    layers: PaintLayer[];
+    drawProgress: number;
+    currentStage: DrawStage;
+    transcript?: string;
+    aiReplyText?: string;
+    operations?: DrawingOperation[];
+  }) => {
+    if (!projectId || !sessionId || serverRevision === null) {
+      return;
+    }
+
+    try {
+      const saved = await saveProjectSnapshot({
+        projectId,
+        sessionId,
+        config: snapshot.config,
+        layers: snapshot.layers,
+        drawProgress: snapshot.drawProgress,
+        currentStage: snapshot.currentStage,
+        canvasObjects: [],
+        clientRevision: serverRevision,
+        historyMeta: {
+          kind: 'command',
+          transcript: snapshot.transcript,
+          aiReplyText: snapshot.aiReplyText,
+          operations: snapshot.operations ?? []
+        }
+      });
+      setServerRevision(saved.serverRevision);
+      setHistoryCount(saved.historyCount ?? historyCount + 1);
+      setRedoCount(saved.redoCount ?? 0);
+      pushLog('system', `后端快照已保存，revision ${saved.serverRevision}。`);
+    } catch (error) {
+      console.warn('Project snapshot save failed; local fallback remains available.', error);
+      pushLog('system', '后端快照保存失败，本次操作仍保留在本地撤销栈。');
+    }
+  };
+
+  const applyConfirmedOperations = async (
+    operations: DrawingOperation[],
+    meta: {
+      transcript?: string;
+      aiReplyText?: string;
+      persist: boolean;
+    }
+  ) => {
+    const nextConfig = applyOperationsToConfig(characterConfig, operations);
+    const nextLayers = applyOperationsToLayers(layers, operations);
+    const startsAutoPainting = operations.some((operation) => operation.type === 'start_auto_painting');
+    const startsStagePainting = operations.some((operation) => operation.type === 'start_stage_painting');
+    const redrawsComponent = operations.some((operation) => operation.type === 'redraw_component');
+
+    setCharacterConfig(nextConfig);
+    setLayers(nextLayers);
+
+    if (operations.some((operation) => operation.type === 'pause')) {
+      handlePauseResume(true);
+      return;
+    }
+    if (operations.some((operation) => operation.type === 'resume')) {
+      handlePauseResume(false);
+      return;
+    }
+    if (operations.some((operation) => operation.type === 'undo')) {
+      await handleUndo();
+      return;
+    }
+    if (operations.some((operation) => operation.type === 'redo')) {
+      await handleRedo();
+      return;
+    }
+    if (operations.some((operation) => operation.type === 'replay')) {
+      await handleReplay();
+      return;
+    }
+    if (operations.some((operation) => operation.type === 'export')) {
+      handleExport();
+      return;
+    }
+
+    if (startsAutoPainting) {
+      pushLog('system', '后端 operations 已确认，启动完整绘画流程。');
+      startPaintingLoop(operationStartProgress(operations, 0));
+    } else if (startsStagePainting) {
+      pushLog('system', '后端 operations 已确认，继续分阶段绘画流程。');
+      startPaintingLoop(drawProgress);
+    } else if (redrawsComponent) {
+      pushLog('system', '后端 operations 已确认，启动局部组件重绘。');
+      startPaintingLoop(70);
+    }
+
+    if (meta.persist) {
+      await persistProjectSnapshot({
+        config: nextConfig,
+        layers: nextLayers,
+        drawProgress: startsAutoPainting || redrawsComponent ? 100 : drawProgress,
+        currentStage: startsAutoPainting || redrawsComponent ? '已完成' : currentStage,
+        transcript: meta.transcript,
+        aiReplyText: meta.aiReplyText,
+        operations
+      });
+    }
+  };
+
+  const applyOperationsToConfig = (
+    baseConfig: CharacterConfig,
+    operations: DrawingOperation[]
+  ): CharacterConfig => {
+    return operations.reduce<CharacterConfig>((nextConfig, operation) => {
+      if (operation.type === 'set_character' || operation.type === 'redraw_component') {
+        return {
+          ...nextConfig,
+          ...operation.patch
+        };
+      }
+
+      return nextConfig;
+    }, baseConfig);
+  };
+
+  const applyOperationsToLayers = (
+    baseLayers: PaintLayer[],
+    operations: DrawingOperation[]
+  ): PaintLayer[] => {
+    return operations.reduce<PaintLayer[]>((nextLayers, operation) => {
+      if (operation.type === 'set_layer_visibility') {
+        return nextLayers.map((layer) =>
+          layer.id === operation.layerId ? { ...layer, visible: operation.visible } : layer
+        );
+      }
+      if (operation.type === 'set_layer_opacity') {
+        return nextLayers.map((layer) =>
+          layer.id === operation.layerId ? { ...layer, opacity: operation.opacity } : layer
+        );
+      }
+
+      return nextLayers;
+    }, baseLayers);
+  };
+
+  const operationStartProgress = (
+    operations: DrawingOperation[],
+    fallbackProgress: number
+  ): number => {
+    const autoPaint = operations.find((operation) => operation.type === 'start_auto_painting');
+    return autoPaint?.type === 'start_auto_painting'
+      ? autoPaint.fromProgress ?? fallbackProgress
+      : fallbackProgress;
+  };
+
+  const resolveConfigFromOperations = (
+    operations: DrawingOperation[]
+  ): Partial<CharacterConfig> | null => {
+    const patch = operations.reduce<Partial<CharacterConfig>>((nextPatch, operation) => {
+      if (operation.type === 'set_character' || operation.type === 'redraw_component') {
+        return {
+          ...nextPatch,
+          ...operation.patch
+        };
+      }
+      return nextPatch;
+    }, {});
+
+    return Object.keys(patch).length > 0 ? patch : null;
+  };
+
+  const operationsForConfirmedCommand = (
+    verb: 'create' | 'edit' | 'accessory' | null,
+    nextConfig: Partial<CharacterConfig> | null
+  ): DrawingOperation[] => {
+    if (!nextConfig) {
+      return [];
+    }
+
+    if (verb === 'create') {
+      return [
+        {
+          type: 'set_character',
+          patch: nextConfig
+        },
+        {
+          type: paintMode === 'stages' ? 'start_stage_painting' : 'start_auto_painting'
+        }
+      ];
+    }
+
+    return [
+      {
+        type: 'set_character',
+        patch: nextConfig
+      }
+    ];
+  };
+
+  const diffCharacterConfig = (
+    before: CharacterConfig,
+    after: CharacterConfig
+  ): Partial<CharacterConfig> => {
+    return {
+      ...(before.gender !== after.gender ? { gender: after.gender } : {}),
+      ...(before.hairLength !== after.hairLength ? { hairLength: after.hairLength } : {}),
+      ...(before.hairColor !== after.hairColor ? { hairColor: after.hairColor } : {}),
+      ...(before.eyeColor !== after.eyeColor ? { eyeColor: after.eyeColor } : {}),
+      ...(before.expression !== after.expression ? { expression: after.expression } : {}),
+      ...(before.outfit !== after.outfit ? { outfit: after.outfit } : {}),
+      ...(before.accessory !== after.accessory ? { accessory: after.accessory } : {}),
+      ...(before.backgroundStyle !== after.backgroundStyle
+        ? { backgroundStyle: after.backgroundStyle }
+        : {})
+    };
+  };
+
+  const fallbackUndo = () => {
     if (history.length === 0) return;
     const prev = history[history.length - 1];
     setRedoStack((old) => [characterConfig, ...old]);
@@ -481,7 +989,35 @@ export default function App() {
     setDrawProgress(100);
   };
 
-  const handleRedo = () => {
+  const handleUndo = async () => {
+    if (projectId && sessionId && serverRevision !== null && historyCount > 0) {
+      try {
+        const restored = await undoProject({
+          projectId,
+          sessionId,
+          currentRevision: serverRevision
+        });
+        setCharacterConfig(restored.config);
+        setLayers(restored.layers);
+        setDrawProgress(restored.drawProgress);
+        setCurrentStage(restored.currentStage);
+        setServerRevision(restored.serverRevision);
+        setHistoryCount(restored.historyCount ?? 0);
+        setRedoCount(restored.redoCount);
+        setUserSpeechSub('撤销');
+        setAiSpeechSub(restored.aiReplyText);
+        pushLog('system', '后端撤销操作完成，工程图纸已恢复到上一版。');
+        return;
+      } catch (error) {
+        console.warn('Backend undo failed; falling back to local history.', error);
+        pushLog('system', '后端撤销不可用，尝试使用本地撤销栈。');
+      }
+    }
+
+    fallbackUndo();
+  };
+
+  const fallbackRedo = () => {
     if (redoStack.length === 0) return;
     const next = redoStack[0];
     setRedoStack((old) => old.slice(1));
@@ -494,10 +1030,38 @@ export default function App() {
     setDrawProgress(100);
   };
 
-  const handleReplay = () => {
+  const handleRedo = async () => {
+    if (projectId && sessionId && serverRevision !== null && redoCount > 0) {
+      try {
+        const restored = await redoProject({
+          projectId,
+          sessionId,
+          currentRevision: serverRevision
+        });
+        setCharacterConfig(restored.config);
+        setLayers(restored.layers);
+        setDrawProgress(restored.drawProgress);
+        setCurrentStage(restored.currentStage);
+        setServerRevision(restored.serverRevision);
+        setHistoryCount(restored.historyCount ?? 0);
+        setRedoCount(restored.redoCount);
+        setUserSpeechSub('重做');
+        setAiSpeechSub(restored.aiReplyText);
+        pushLog('system', '后端重做操作完成，工程图纸已重新覆写。');
+        return;
+      } catch (error) {
+        console.warn('Backend redo failed; falling back to local redo stack.', error);
+        pushLog('system', '后端重做不可用，尝试使用本地重做栈。');
+      }
+    }
+
+    fallbackRedo();
+  };
+
+  const runFastReplay = (sourceLabel: string) => {
     pushLog('system', '触发回放引擎。清空工程数据，执行快速过程追踪回溯重演。');
-    pushLog('ai', '好的，清空画布！为您进行 0 - 100% 超高速作画回放，请查阅。');
-    setAiSpeechSub('正在快速重演上述主要绘画工序（3秒内闪速走步草图、精描、涂层色彩和高光粒子），供评委鉴赏完整的工程轨迹。');
+    pushLog('ai', sourceLabel);
+    setAiSpeechSub(sourceLabel);
 
     // Fast replay loop: we reset progress to 1, and make it jump fast
     if (paintTimerRef.current) clearInterval(paintTimerRef.current);
@@ -520,6 +1084,67 @@ export default function App() {
         setDrawProgress(current);
       }
     }, 120);
+  };
+
+  const runHistoryReplay = (items: ProjectHistoryEntry[]) => {
+    const replayItems = [...items].reverse();
+    pushLog('system', `使用后端历史回放 ${replayItems.length} 步。`);
+    setAiSpeechSub(`使用后端历史回放 ${replayItems.length} 步，正在按历史操作推进画布。`);
+
+    if (paintTimerRef.current) clearInterval(paintTimerRef.current);
+
+    setDrawProgress(1);
+    setIsAwaitingConfirm(false);
+    setSystemState('绘画中');
+
+    let index = 0;
+    paintTimerRef.current = setInterval(() => {
+      const item = replayItems[index];
+      if (!item) {
+        clearInterval(paintTimerRef.current!);
+        setDrawProgress(100);
+        setCurrentStage('已完成');
+        setSystemState('等待指令');
+        pushLog('system', '🎥 后端历史步骤回放完成。');
+        pushLog('ai', '回演完毕。');
+        setAiSpeechSub('后端历史回放已完成，画布停留在最新可编辑状态。');
+        return;
+      }
+
+      setCharacterConfig((config) => applyOperationsToConfig(config, item.operations));
+      setLayers((currentLayers) => applyOperationsToLayers(currentLayers, item.operations));
+      setDrawProgress(item.drawProgress);
+      setCurrentStage(item.currentStage);
+      pushLog(
+        'system',
+        `回放 ${index + 1}/${replayItems.length}: ${item.transcript ?? item.kind} (${item.currentStage} ${item.drawProgress}%)`
+      );
+      index += 1;
+    }, Math.max(280, Math.floor(1800 / Math.max(replayItems.length, 1))));
+  };
+
+  const handleReplay = async () => {
+    if (projectId && sessionId) {
+      try {
+        const projectHistory = await getProjectHistory({
+          projectId,
+          sessionId,
+          limit: 50
+        });
+        setHistoryCount(projectHistory.undoCount);
+        setRedoCount(projectHistory.redoCount);
+
+        if (projectHistory.items.length > 0) {
+          runHistoryReplay(projectHistory.items);
+          return;
+        }
+      } catch (error) {
+        console.warn('Backend replay history failed; falling back to local replay.', error);
+        pushLog('system', '后端历史读取失败，切回本地轻量回放。');
+      }
+    }
+
+    runFastReplay('好的，清空画布！为您进行 0 - 100% 超高速作画回放，请查阅。');
   };
 
   // Trigger from Storyboard Shortcut buttons
@@ -762,8 +1387,8 @@ export default function App() {
                 onRedo={handleRedo}
                 onReplay={handleReplay}
                 onExport={handleExport}
-                canUndo={history.length > 0}
-                canRedo={redoStack.length > 0}
+                canUndo={historyCount > 0 || history.length > 0}
+                canRedo={redoCount > 0 || redoStack.length > 0}
                 isLightMode={isLightMode}
               />
             </div>

@@ -38,6 +38,28 @@ projectsRouter.post(
 );
 
 projectsRouter.get(
+  "/:projectId/history",
+  asyncHandler(async (req, res) => {
+    const parsed = projectHistoryQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      throw validationError(parsed.error);
+    }
+
+    const project = await loadProjectOrThrow(req.params.projectId);
+    assertProjectSession(project, parsed.data.sessionId);
+
+    const history = await getProjectHistory(project.projectId);
+    const items = history.undoStack.slice(-parsed.data.limit).reverse().map(toHistoryListItem);
+
+    res.json({
+      items,
+      undoCount: history.undoStack.length,
+      redoCount: history.redoStack.length
+    });
+  })
+);
+
+projectsRouter.get(
   "/:projectId",
   asyncHandler(async (req, res) => {
     const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : undefined;
@@ -60,28 +82,6 @@ projectsRouter.get(
     }
 
     res.json(toProjectResponse(project, true));
-  })
-);
-
-projectsRouter.get(
-  "/:projectId/history",
-  asyncHandler(async (req, res) => {
-    const parsed = projectHistoryQuerySchema.safeParse(req.query);
-    if (!parsed.success) {
-      throw validationError(parsed.error);
-    }
-
-    const project = await loadProjectOrThrow(req.params.projectId);
-    assertProjectSession(project, parsed.data.sessionId);
-
-    const history = await getProjectHistory(project.projectId);
-    const items = history.undoStack.slice(-parsed.data.limit).reverse().map(toHistoryListItem);
-
-    res.json({
-      items,
-      undoCount: history.undoStack.length,
-      redoCount: history.redoStack.length
-    });
   })
 );
 
@@ -123,6 +123,8 @@ projectsRouter.put(
     res.json({
       projectId: updated.projectId,
       serverRevision: updated.serverRevision,
+      historyCount: updated.historyCount,
+      redoCount: 0,
       savedAt: updated.updatedAt
     });
   })
