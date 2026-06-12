@@ -107,6 +107,7 @@ export default function App() {
 
   // Painting drawing loop timer ref
   const paintTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const bootstrapStartedRef = useRef<boolean>(false);
 
   // UI layout extra toggles
   const [isFullScreen, setIsFullScreen] = useState<boolean>(false);
@@ -154,6 +155,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (bootstrapStartedRef.current) {
+      return;
+    }
+    bootstrapStartedRef.current = true;
+
     let cancelled = false;
 
     const bootstrapProject = async () => {

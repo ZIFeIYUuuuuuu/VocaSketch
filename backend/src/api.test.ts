@@ -59,9 +59,8 @@ try {
   assert.equal(project.body.layers.length, 6);
 
   const readWithoutSession = await request(baseUrl, `/projects/${project.body.projectId}`);
-  assert.equal(readWithoutSession.status, 200);
-  assert.equal(readWithoutSession.body.projectId, project.body.projectId);
-  assert.equal(readWithoutSession.body.historyCount, 0);
+  assert.equal(readWithoutSession.status, 400);
+  assert.equal(readWithoutSession.body.error.code, "REQUEST_INVALID");
 
   const readWithSession = await request(
     baseUrl,
@@ -248,6 +247,21 @@ try {
   assert.equal(confirmed.body.confirmed, true);
   assert.deepEqual(confirmed.body.operations, interpretation.body.operations);
 
+  const confirmAgain = await request(
+    baseUrl,
+    `/commands/${interpretation.body.interpretationId}/confirm`,
+    {
+      method: "POST",
+      body: {
+        sessionId: session.body.sessionId,
+        projectId: project.body.projectId,
+        confirmed: true
+      }
+    }
+  );
+  assert.equal(confirmAgain.status, 409);
+  assert.equal(confirmAgain.body.error.code, "CONFIRMATION_ALREADY_RESOLVED");
+
   const rejectTarget = await request(baseUrl, "/commands/interpret", {
     method: "POST",
     body: {
@@ -256,6 +270,19 @@ try {
       text: "戴上一副红框大圆眼镜"
     }
   });
+
+  const rejectWithoutSession = await request(
+    baseUrl,
+    `/commands/${rejectTarget.body.interpretationId}/reject`,
+    {
+      method: "POST",
+      body: {
+        reasonText: "不对，取消"
+      }
+    }
+  );
+  assert.equal(rejectWithoutSession.status, 400);
+  assert.equal(rejectWithoutSession.body.error.code, "REQUEST_INVALID");
 
   const rejected = await request(baseUrl, `/commands/${rejectTarget.body.interpretationId}/reject`, {
     method: "POST",
@@ -269,6 +296,21 @@ try {
   assert.equal(rejected.status, 200);
   assert.equal(rejected.body.cancelled, true);
   assert.equal(rejected.body.aiReplyText, "好的，我先不执行这次修改。");
+
+  const confirmRejected = await request(
+    baseUrl,
+    `/commands/${rejectTarget.body.interpretationId}/confirm`,
+    {
+      method: "POST",
+      body: {
+        sessionId: session.body.sessionId,
+        projectId: project.body.projectId,
+        confirmed: true
+      }
+    }
+  );
+  assert.equal(confirmRejected.status, 409);
+  assert.equal(confirmRejected.body.error.code, "CONFIRMATION_ALREADY_RESOLVED");
 
   const invalidInterpretRequest = await request(baseUrl, "/commands/interpret", {
     method: "POST",

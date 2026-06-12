@@ -96,8 +96,8 @@ export const confirmInterpretationSchema = z.object({
 });
 
 export const rejectInterpretationSchema = z.object({
-  sessionId: z.string().trim().min(1).optional(),
-  projectId: z.string().trim().min(1).optional(),
+  sessionId: z.string().trim().min(1),
+  projectId: z.string().trim().min(1),
   reasonText: z.string().optional()
 });
 
