@@ -167,7 +167,7 @@ export const VoiceController: React.FC<VoiceControllerProps> = ({
             </div>
 
             <span className={`text-[10px] font-mono font-bold tracking-wider ${isLightMode ? 'text-slate-600' : 'text-slate-500'} mt-2`}>
-              {isListening ? '🎙️ 正在聆听，说完自动识别' : '点击开麦 (自动识别)'}
+              {isListening ? '🎙️ 实时识别中 (说完可点停)' : '点击开麦 (实时识别)'}
             </span>
           </div>
 
@@ -219,7 +219,7 @@ export const VoiceController: React.FC<VoiceControllerProps> = ({
             <span className="opacity-40">|</span>
             <span>“导出保存原图”</span>
           </div>
-          <span className={`${isLightMode ? 'text-slate-500' : 'text-neutral-600'} hidden md:inline`}>语音 ASR 普通话识别率 &gt;98.5%</span>
+          <span className={`${isLightMode ? 'text-slate-500' : 'text-neutral-600'} hidden md:inline`}>Paraformer 实时 ASR 普通话识别</span>
         </div>
       </div>
 

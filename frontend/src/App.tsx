@@ -44,6 +44,7 @@ import type { CommandInterpretation, DrawingOperation, ProjectHistoryEntry } fro
 const SpeechRecognitionAPI =
   (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4000/api/v1';
 const SESSION_STORAGE_KEY = 'vocasketch.sessionId';
 const PROJECT_STORAGE_KEY = 'vocasketch.projectId';
 const AUTO_RECORD_MAX_MS = 6500;
@@ -120,6 +121,13 @@ export default function App() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaChunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
+  const realtimeSocketRef = useRef<WebSocket | null>(null);
+  const realtimeAudioContextRef = useRef<AudioContext | null>(null);
+  const realtimeSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const realtimeProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const realtimeFinalTranscriptRef = useRef<string>('');
+  const realtimePartialTranscriptRef = useRef<string>('');
+  const realtimeStoppingRef = useRef<boolean>(false);
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
   const recorderStopRequestedRef = useRef<boolean>(false);
   const recorderStopHandledRef = useRef<boolean>(false);
@@ -339,6 +347,8 @@ export default function App() {
         clearTimeout(redrawPulseTimerRef.current);
       }
       cleanupRecordingResources();
+      cleanupRealtimeAudio();
+      cleanupRealtimeSocket();
     };
   }, []);
 
@@ -1407,94 +1417,367 @@ export default function App() {
   };
 
   // -------------------------------------------------------------------------
-  // 7. REAL VOICE HANDLING WITH DASHSCOPE ASR AND WEB SPEECH FALLBACK
+  // -------------------------------------------------------------------------
+  // 7. REAL VOICE HANDLING WITH DASHSCOPE REALTIME ASR AND FALLBACKS
   // -------------------------------------------------------------------------
   const toggleSpeechRecognition = async () => {
     if (isListening) {
+      stopRealtimeAsr();
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         requestRecorderStop('manual');
         return;
       }
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
-      }
+      recognitionRef.current?.stop();
       setIsListening(false);
+      setSystemState('等待指令');
       pushLog('system', '麦克风监听关闭。');
-    } else {
-      if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
-        startWebSpeechFallback();
-        return;
+      return;
+    }
+
+    if (!sessionId || !projectId) {
+      startWebSpeechFallback('工程会话尚未就绪，临时切换浏览器识别。');
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia || typeof WebSocket === 'undefined') {
+      await startRecordedAsrFallback('浏览器不支持实时音频通道，切换短录音识别。');
+      return;
+    }
+
+    try {
+      await startRealtimeAsr();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '实时语音识别启动失败。';
+      console.warn('Realtime ASR unavailable.', error);
+      setMicError(message);
+      setUserSpeechSub(message);
+      pushLog('system', `实时语音识别未启动：${message}`);
+      await startRecordedAsrFallback('实时通道不可用，切换短录音识别。');
+    }
+  };
+
+  const startRealtimeAsr = async () => {
+    if (!sessionId || !projectId) {
+      throw new Error('缺少 session/project，无法启动实时识别。');
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        noiseSuppression: true,
+        echoCancellation: true,
+        autoGainControl: true
       }
+    });
+    const socket = new WebSocket(toRealtimeAsrUrl());
+    socket.binaryType = 'arraybuffer';
 
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        streamRef.current = stream;
-        mediaChunksRef.current = [];
-        recorderStopRequestedRef.current = false;
-        recorderStopHandledRef.current = false;
-        const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
-        const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-        mediaRecorderRef.current = recorder;
+    streamRef.current = stream;
+    realtimeSocketRef.current = socket;
+    realtimeFinalTranscriptRef.current = '';
+    realtimePartialTranscriptRef.current = '';
+    realtimeStoppingRef.current = false;
+    setMicError(null);
+    setIsListening(true);
+    setSystemState('聆听中');
+    setUserSpeechSub('正在连接实时语音识别...');
+    pushLog('system', '🎙️ 麦克风已捕获，正在连接实时 ASR。');
 
-        recorder.ondataavailable = (event) => {
-          if (event.data.size > 0) {
-            mediaChunksRef.current.push(event.data);
+    await new Promise<void>((resolve, reject) => {
+      let opened = false;
+      let settled = false;
+      const fail = (message: string) => {
+        if (settled) return;
+        settled = true;
+        cleanupRealtimeAudio();
+        cleanupRealtimeSocket();
+        setIsListening(false);
+        setSystemState('等待指令');
+        reject(new Error(message));
+      };
+
+      socket.onopen = () => {
+        opened = true;
+        socket.send(JSON.stringify({
+          type: 'start',
+          sessionId,
+          projectId,
+          locale: 'zh-CN'
+        }));
+        setUserSpeechSub('实时识别准备中...');
+      };
+
+      socket.onerror = () => {
+        if (!opened) {
+          fail('实时 ASR WebSocket 连接失败。');
+          return;
+        }
+        setMicError('实时 ASR WebSocket 连接中断。');
+        pushLog('system', '实时 ASR WebSocket 连接中断。');
+      };
+
+      socket.onmessage = (event) => {
+        const message = parseRealtimeMessage(event.data);
+        if (!message) return;
+
+        if (message.type === 'starting') {
+          setUserSpeechSub('实时识别已连接，等待服务就绪...');
+          return;
+        }
+
+        if (message.type === 'ready') {
+          startRealtimeAudioPipeline(stream, socket);
+          setUserSpeechSub('正在听您说话...');
+          pushLog('system', '🎙️ 实时 ASR 已就绪，请直接说口令。');
+          if (!settled) {
+            settled = true;
+            resolve();
           }
-        };
+          return;
+        }
 
-        recorder.onstop = () => {
-          if (recorderStopHandledRef.current) {
-            return;
+        if (message.type === 'partial' || message.type === 'final') {
+          const transcript = message.transcript.trim();
+          if (!transcript) return;
+          realtimePartialTranscriptRef.current = transcript;
+          if (message.type === 'final') {
+            realtimeFinalTranscriptRef.current = transcript;
           }
-          recorderStopHandledRef.current = true;
-          const blob = new Blob(mediaChunksRef.current, { type: mimeType || 'audio/webm' });
-          mediaChunksRef.current = [];
-          cleanupRecordingResources();
-          mediaRecorderRef.current = null;
+          setUserSpeechSub(transcript);
+          return;
+        }
+
+        if (message.type === 'done') {
+          const transcript =
+            realtimeFinalTranscriptRef.current.trim() || realtimePartialTranscriptRef.current.trim();
+          cleanupRealtimeAudio();
+          cleanupRealtimeSocket();
           setIsListening(false);
-          if (blob.size === 0) {
-            setSystemState('等待指令');
-            setUserSpeechSub('没有录到有效语音，请再试一次。');
-            pushLog('system', '本次录音为空，未提交 ASR。');
-            return;
+          setSystemState(transcript ? '思考中' : '等待指令');
+          if (transcript) {
+            pushLog('system', `实时 ASR 识别完成：${transcript}`);
+            void interpretVoiceCommand(transcript);
+          } else {
+            setUserSpeechSub('没有听到有效语音，请再试一次。');
           }
-          void handleRecordedAudio(blob);
-        };
+          return;
+        }
 
-        recorder.onerror = (event) => {
-          console.warn('MediaRecorder error', event);
-          cleanupRecordingResources();
-          mediaRecorderRef.current = null;
+        if (message.type === 'error') {
+          const messageText = message.message || '实时语音识别失败。';
+          setMicError(messageText);
+          setUserSpeechSub(messageText);
+          pushLog('system', `实时 ASR 错误：${messageText}`);
+          fail(messageText);
+        }
+      };
+
+      socket.onclose = () => {
+        if (!opened) {
+          fail('实时 ASR 连接被关闭。');
+          return;
+        }
+        if (!realtimeStoppingRef.current && realtimeSocketRef.current === socket) {
+          cleanupRealtimeAudio();
+          cleanupRealtimeSocket();
           setIsListening(false);
           setSystemState('等待指令');
-          pushLog('system', '浏览器录音出错，已停止本次录音。');
-        };
+        }
+      };
+    });
+  };
 
-        setMicError(null);
-        setIsListening(true);
-        setSystemState('聆听中');
-        setUserSpeechSub('正在录入您的普通话，说完会自动识别...');
-        pushLog('system', '🎙️ 麦克风已捕获，使用后端 ASR 自动录音中。说完会自动提交，也可再次点击手动结束。');
-        recorder.start(250);
-        startSpeechAutoStopMonitor(stream);
-      } catch (error) {
-        console.warn('MediaRecorder unavailable; falling back to Web Speech.', error);
-        cleanupRecordingResources();
-        startWebSpeechFallback();
-      }
+  const stopRealtimeAsr = () => {
+    realtimeStoppingRef.current = true;
+    cleanupRealtimeAudio();
+    const socket = realtimeSocketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'finish' }));
+      setUserSpeechSub('正在完成实时识别...');
+      pushLog('system', '已停止说话，正在收尾实时识别。');
+      return;
     }
+    cleanupRealtimeSocket();
+  };
+
+  const cleanupRealtimeAudio = () => {
+    realtimeProcessorRef.current?.disconnect();
+    realtimeSourceRef.current?.disconnect();
+    void realtimeAudioContextRef.current?.close().catch(() => undefined);
+    realtimeProcessorRef.current = null;
+    realtimeSourceRef.current = null;
+    realtimeAudioContextRef.current = null;
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+  };
+
+  const cleanupRealtimeSocket = () => {
+    const socket = realtimeSocketRef.current;
+    realtimeSocketRef.current = null;
+    if (socket && socket.readyState !== WebSocket.CLOSED && socket.readyState !== WebSocket.CLOSING) {
+      socket.close();
+    }
+  };
+
+  const startRealtimeAudioPipeline = (stream: MediaStream, socket: WebSocket) => {
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextClass) {
+      throw new Error('浏览器不支持 AudioContext。');
+    }
+
+    const audioContext = new AudioContextClass();
+    const source = audioContext.createMediaStreamSource(stream);
+    const processor = audioContext.createScriptProcessor(4096, 1, 1);
+    realtimeAudioContextRef.current = audioContext;
+    realtimeSourceRef.current = source;
+    realtimeProcessorRef.current = processor;
+
+    processor.onaudioprocess = (event) => {
+      if (socket.readyState !== WebSocket.OPEN || realtimeStoppingRef.current) {
+        return;
+      }
+      const input = event.inputBuffer.getChannelData(0);
+      const resampled = resampleFloat32(input, audioContext.sampleRate, 8000);
+      socket.send(floatTo16BitPcm(resampled));
+    };
+
+    source.connect(processor);
+    processor.connect(audioContext.destination);
+  };
+
+  const startRecordedAsrFallback = async (reason?: string) => {
+    if (reason) {
+      pushLog('system', reason);
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      startWebSpeechFallback('浏览器不支持录音上传，切换 Web Speech。');
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      mediaChunksRef.current = [];
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      let submitted = false;
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          mediaChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        if (submitted) return;
+        submitted = true;
+        const blob = new Blob(mediaChunksRef.current, { type: mimeType || 'audio/webm' });
+        mediaChunksRef.current = [];
+        streamRef.current?.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+        mediaRecorderRef.current = null;
+        setIsListening(false);
+        void handleRecordedAudio(blob);
+      };
+
+      setMicError(null);
+      setIsListening(true);
+      setSystemState('聆听中');
+      setUserSpeechSub('短录音识别中，请说完整口令...');
+      pushLog('system', '🎙️ 已进入短录音 ASR 备用模式，结束后自动提交。');
+      recorder.start();
+      window.setTimeout(() => {
+        if (recorder.state !== 'inactive') {
+          recorder.stop();
+        }
+      }, 5000);
+    } catch (error) {
+      console.warn('MediaRecorder unavailable; falling back to Web Speech.', error);
+      startWebSpeechFallback('录音上传不可用，切换 Web Speech。');
+    }
+  };
+
+  const toRealtimeAsrUrl = () => {
+    const httpBase = apiBaseUrl.replace(/\/api\/v1\/?$/, '');
+    const wsBase = httpBase.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
+    return `${wsBase}/api/v1/voice/asr/realtime`;
+  };
+
+  const parseRealtimeMessage = (data: unknown) => {
+    if (typeof data !== 'string') {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(data) as {
+        type?: string;
+        transcript?: string;
+        message?: string;
+      };
+      if (
+        parsed.type === 'starting' ||
+        parsed.type === 'ready' ||
+        parsed.type === 'done' ||
+        parsed.type === 'partial' ||
+        parsed.type === 'final' ||
+        parsed.type === 'error'
+      ) {
+        return {
+          type: parsed.type,
+          transcript: parsed.transcript ?? '',
+          message: parsed.message ?? ''
+        };
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
+  const resampleFloat32 = (
+    input: Float32Array,
+    sourceSampleRate: number,
+    targetSampleRate: number
+  ) => {
+    if (sourceSampleRate === targetSampleRate) {
+      return input;
+    }
+
+    const ratio = sourceSampleRate / targetSampleRate;
+    const outputLength = Math.floor(input.length / ratio);
+    const output = new Float32Array(outputLength);
+    for (let index = 0; index < outputLength; index += 1) {
+      const sourceIndex = index * ratio;
+      const before = Math.floor(sourceIndex);
+      const after = Math.min(before + 1, input.length - 1);
+      const weight = sourceIndex - before;
+      output[index] = input[before] * (1 - weight) + input[after] * weight;
+    }
+    return output;
+  };
+
+  const floatTo16BitPcm = (input: Float32Array) => {
+    const buffer = new ArrayBuffer(input.length * 2);
+    const view = new DataView(buffer);
+    for (let index = 0; index < input.length; index += 1) {
+      const sample = Math.max(-1, Math.min(1, input[index]));
+      view.setInt16(index * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+    }
+    return buffer;
   };
 
   const handleRecordedAudio = async (audio: Blob) => {
     if (!sessionId || !projectId) {
-      startWebSpeechFallback();
+      startWebSpeechFallback('工程会话尚未就绪，切换 Web Speech。');
       return;
     }
 
     try {
       setSystemState('思考中');
       setUserSpeechSub('正在识别语音...');
-      pushLog('system', '正在上传录音到后端 ASR 服务...');
+      pushLog('system', '正在上传备用录音到后端 ASR 服务...');
       const result = await transcribeAudio({
         sessionId,
         projectId,
@@ -1509,11 +1792,15 @@ export default function App() {
     } catch (error) {
       console.warn('ASR failed; falling back to Web Speech.', error);
       pushLog('system', '语音服务不可用，已切换浏览器 Web Speech fallback。');
-      startWebSpeechFallback();
+      startWebSpeechFallback('后端 ASR 不可用，切换 Web Speech。');
     }
   };
 
-  const startWebSpeechFallback = () => {
+  const startWebSpeechFallback = (reason?: string) => {
+    if (reason) {
+      pushLog('system', reason);
+    }
+
     if (!SpeechRecognitionAPI) {
       setMicError('您的浏览器未对 Web Speech API 进行完整适配。建议直接使用右侧极速卡片触发，或使用 Chrome 浏览器。');
       pushLog('system', '⚠️ Speech API 不支持（已启动纯拟真交互方案）。');
@@ -1525,44 +1812,58 @@ export default function App() {
       return;
     }
 
-      setMicError(null);
-      setIsListening(true);
-      pushLog('system', '🎙️ 麦克风已捕获，聆听中... 欢迎说出语音指令。');
+    setMicError(null);
+    setIsListening(true);
+    pushLog('system', '🎙️ 已进入浏览器 Web Speech 备用识别。');
 
-      const r = new SpeechRecognitionAPI();
-      r.continuous = false;
-      r.interimResults = false;
-      r.lang = 'zh-CN';
+    const r = new SpeechRecognitionAPI();
+    r.continuous = false;
+    r.interimResults = true;
+    r.lang = 'zh-CN';
 
-      r.onstart = () => {
-        setSystemState('聆听中');
-        setUserSpeechSub('正在录入您的普通话...');
-      };
+    r.onstart = () => {
+      setSystemState('聆听中');
+      setUserSpeechSub('浏览器备用识别中...');
+    };
 
-      r.onresult = (event: any) => {
-        const textResult = event.results[0][0].transcript;
-        interpretVoiceCommand(textResult);
-      };
-
-      r.onerror = (e: any) => {
-        console.error('Speech recognition error', e);
-        setMicError(`识别信号偏弱: ${e.error}`);
-        r.stop();
-        setIsListening(false);
-        setSystemState('等待指令');
-      };
-
-      r.onend = () => {
-        setIsListening(false);
-        if (systemState === '聆听中') {
-          setSystemState('等待指令');
+    r.onresult = (event: any) => {
+      let interim = '';
+      let finalText = '';
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const textResult = event.results[index][0].transcript;
+        if (event.results[index].isFinal) {
+          finalText += textResult;
+        } else {
+          interim += textResult;
         }
-      };
+      }
+      const display = finalText || interim;
+      if (display) {
+        setUserSpeechSub(display);
+      }
+      if (finalText.trim()) {
+        interpretVoiceCommand(finalText);
+      }
+    };
 
-      recognitionRef.current = r;
-      r.start();
+    r.onerror = (e: any) => {
+      console.error('Speech recognition error', e);
+      setMicError(`识别信号偏弱: ${e.error}`);
+      r.stop();
+      setIsListening(false);
+      setSystemState('等待指令');
+    };
+
+    r.onend = () => {
+      setIsListening(false);
+      if (systemState === '聆听中') {
+        setSystemState('等待指令');
+      }
+    };
+
+    recognitionRef.current = r;
+    r.start();
   };
-
   return (
     <div className={`min-h-screen ${isLightMode ? 'bg-[#f4f5f8] text-slate-800' : 'bg-[#09090c] text-slate-100'} flex flex-col font-sans transition-colors duration-300 selection:bg-cyan-550 selection:text-black`}>
 
