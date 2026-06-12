@@ -17,6 +17,7 @@ frontend/.vite/
 *.log
 logs/
 data/
+backend/data/
 
 # OS and editor files
 .DS_Store

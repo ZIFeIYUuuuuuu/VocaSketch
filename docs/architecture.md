@@ -38,7 +38,7 @@ User speech
 - save project files and operation history
 - provide stable API boundaries for future model/provider replacement
 
-The current backend PR implements a minimal Node.js service with in-memory sessions, projects, snapshots, and rule-based text command interpretation. It intentionally keeps ASR/TTS, LLM calls, JSON Schema validation, and durable storage as later integration steps.
+The current backend implements a minimal Node.js service with JSON-backed anonymous sessions, projects, snapshots, and rule-based text command interpretation. It intentionally keeps ASR/TTS and LLM calls as later integration steps.
 
 ## Parser Adapter
 
@@ -82,7 +82,7 @@ The backend should save:
 - parser result
 - confirmation records
 
-For the local competition demo, anonymous sessions are enough. Login is out of MVP scope.
+For the local competition demo, anonymous sessions and local JSON files under `APP_STORAGE_DIR` are enough. Login and database setup are out of MVP scope.
 
 ## Risk Controls
 
