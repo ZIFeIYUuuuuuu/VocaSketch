@@ -13,8 +13,10 @@ class ProviderConfigError(ValueError):
 
 class OpenAIProviderConfig(BaseModel):
     apiBaseUrl: str | None = None
+    apiKey: str | None = None
     responseModel: str | None = None
     imageModel: str | None = None
+    timeoutSeconds: float = 20.0
 
 
 class DashScopeProviderConfig(BaseModel):
@@ -58,18 +60,16 @@ def get_provider_config() -> ProviderConfig:
         "yes",
         "on",
     }
-    if allow_live_requests:
-        raise ProviderConfigError(
-            "Live provider requests are disabled in Stage 5. Keep VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS unset or false."
-        )
 
     return ProviderConfig(
         profile=profile,
-        allowLiveRequests=False,
+        allowLiveRequests=allow_live_requests,
         openai=OpenAIProviderConfig(
             apiBaseUrl=_optional_env("VOCASKETCH_OPENAI_API_BASE_URL"),
+            apiKey=_optional_env("VOCASKETCH_OPENAI_API_KEY"),
             responseModel=_optional_env("VOCASKETCH_OPENAI_RESPONSE_MODEL"),
             imageModel=_optional_env("VOCASKETCH_OPENAI_IMAGE_MODEL"),
+            timeoutSeconds=float(os.getenv("VOCASKETCH_OPENAI_TIMEOUT_SECONDS", "20")),
         ),
         dashscope=DashScopeProviderConfig(
             apiBaseUrl=_optional_env("VOCASKETCH_DASHSCOPE_API_BASE_URL"),

@@ -2,7 +2,12 @@ import type {
   ApiProject,
   ApiSession,
   AsrResponse,
+  AssetRecord,
   ConfirmCommandResponse,
+  DrawingJob,
+  DrawingJobCreatedEnvelope,
+  DrawingJobRetryResponse,
+  JobEvent,
   CommandInterpretation,
   InterpretCommandRequest,
   ProjectHistoryResponse,
@@ -13,6 +18,19 @@ import type {
 } from './types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4000/api/v1';
+const DRAWING_API_BASE_URL = import.meta.env.VITE_API_V2_BASE_URL ?? 'http://localhost:8000/api/v2';
+
+type DrawingJobEventType = JobEvent['type'];
+
+interface DrawingJobEventHandlers {
+  onEvent?: (event: JobEvent) => void;
+  onOpen?: () => void;
+  onError?: (error: Event) => void;
+}
+
+export function getV2ApiBaseUrl(): string {
+  return DRAWING_API_BASE_URL;
+}
 
 export async function createSession(input: {
   clientId: string;
@@ -163,6 +181,155 @@ export async function synthesizeSpeech(input: {
   });
 }
 
+export async function createDrawingJob(
+  inputText: string,
+  options?: {
+    locale?: string;
+    clientSessionId?: string;
+    projectHint?: string;
+    qualityProfile?: 'standard' | 'high';
+    references?: string[];
+    simulateFailureAt?: DrawingJob['simulateFailureAt'];
+  }
+): Promise<DrawingJobCreatedEnvelope> {
+  return v2ApiRequest('/drawing-jobs', {
+    method: 'POST',
+    body: {
+      inputText,
+      locale: options?.locale ?? 'zh-CN',
+      clientSessionId: options?.clientSessionId,
+      projectHint: options?.projectHint,
+      qualityProfile: options?.qualityProfile ?? 'high',
+      references: options?.references ?? [],
+      simulateFailureAt: options?.simulateFailureAt
+    }
+  });
+}
+
+export async function getDrawingJob(jobId: string): Promise<DrawingJob> {
+  return v2ApiRequest(`/drawing-jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function confirmDrawingJob(
+  jobId: string,
+  payload?: {
+    decision?: 'approve';
+    selectedPreviewAssetId?: string;
+    notes?: string;
+  }
+): Promise<DrawingJob> {
+  return v2ApiRequest(`/drawing-jobs/${encodeURIComponent(jobId)}/confirm`, {
+    method: 'POST',
+    body: {
+      decision: payload?.decision ?? 'approve',
+      selectedPreviewAssetId: payload?.selectedPreviewAssetId,
+      notes: payload?.notes
+    }
+  });
+}
+
+export async function cancelDrawingJob(jobId: string, reason?: string): Promise<DrawingJob> {
+  return v2ApiRequest(`/drawing-jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: 'POST',
+    body: {
+      reason
+    }
+  });
+}
+
+export async function retryDrawingJob(
+  jobId: string,
+  payload?: {
+    fromPhase?: DrawingJob['simulateFailureAt'];
+    reason?: string;
+  }
+): Promise<DrawingJobRetryResponse> {
+  return v2ApiRequest(`/drawing-jobs/${encodeURIComponent(jobId)}/retry`, {
+    method: 'POST',
+    body: {
+      fromPhase: payload?.fromPhase,
+      reason: payload?.reason
+    }
+  });
+}
+
+export async function getAssetMetadata(assetId: string): Promise<AssetRecord> {
+  return v2ApiRequest(`/assets/${encodeURIComponent(assetId)}`);
+}
+
+export function buildAssetContentUrl(assetOrAssetId: string | { assetId: string; contentUrl?: string | null }): string {
+  if (typeof assetOrAssetId === 'string') {
+    return resolveV2Url(`/api/v2/assets/${encodeURIComponent(assetOrAssetId)}/content`);
+  }
+
+  if (assetOrAssetId.contentUrl) {
+    return resolveV2Url(assetOrAssetId.contentUrl);
+  }
+
+  return resolveV2Url(`/api/v2/assets/${encodeURIComponent(assetOrAssetId.assetId)}/content`);
+}
+
+export function subscribeDrawingJobEvents(
+  jobId: string,
+  handlers: DrawingJobEventHandlers = {}
+): { close: () => void; usingEventSource: boolean } {
+  if (typeof window === 'undefined' || typeof window.EventSource === 'undefined') {
+    return {
+      close: () => undefined,
+      usingEventSource: false
+    };
+  }
+
+  const source = new EventSource(resolveV2Url(`/api/v2/drawing-jobs/${encodeURIComponent(jobId)}/events`));
+  let isClosed = false;
+  const eventTypes: DrawingJobEventType[] = [
+    'job.created',
+    'job.status_changed',
+    'intent.ready',
+    'prompt.ready',
+    'preview.ready',
+    'job.confirmed',
+    'final.ready',
+    'layers.ready',
+    'playback.ready',
+    'job.completed',
+    'job.failed',
+    'job.cancelled'
+  ];
+
+  const dispatch = (event: MessageEvent) => {
+    const payload = parseEventPayload(event.data);
+    if (payload) {
+      handlers.onEvent?.(payload);
+    }
+  };
+
+  source.onopen = () => {
+    handlers.onOpen?.();
+  };
+  source.onerror = (error) => {
+    if (!isClosed) {
+      isClosed = true;
+      source.close();
+    }
+    handlers.onError?.(error);
+  };
+
+  for (const eventType of eventTypes) {
+    source.addEventListener(eventType, dispatch as EventListener);
+  }
+
+  return {
+    close: () => {
+      if (!isClosed) {
+        isClosed = true;
+        source.close();
+      }
+    },
+    usingEventSource: true
+  };
+}
+
 async function apiRequest<T>(
   path: string,
   options: {
@@ -171,8 +338,30 @@ async function apiRequest<T>(
     formData?: FormData;
   } = {}
 ): Promise<T> {
+  return performRequest<T>(toApiUrl(API_BASE_URL, path), options);
+}
+
+async function v2ApiRequest<T>(
+  path: string,
+  options: {
+    method?: string;
+    body?: unknown;
+    formData?: FormData;
+  } = {}
+): Promise<T> {
+  return performRequest<T>(toApiUrl(DRAWING_API_BASE_URL, path), options);
+}
+
+async function performRequest<T>(
+  url: string,
+  options: {
+    method?: string;
+    body?: unknown;
+    formData?: FormData;
+  }
+): Promise<T> {
   const isFormData = options.formData !== undefined;
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await fetch(url, {
     method: options.method ?? 'GET',
     headers: isFormData
       ? undefined
@@ -182,19 +371,51 @@ async function apiRequest<T>(
     body: isFormData
       ? options.formData
       : options.body === undefined
-      ? undefined
-      : JSON.stringify(options.body)
+        ? undefined
+        : JSON.stringify(options.body)
   });
 
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    const message = payload?.error?.message ?? `API request failed with ${response.status}`;
+    const detail = payload?.detail;
+    const message =
+      payload?.error?.message ??
+      (typeof detail === 'string' ? detail : null) ??
+      `API request failed with ${response.status}`;
     const error = new Error(message) as Error & { status?: number; code?: string; details?: unknown };
     error.status = response.status;
     error.code = payload?.error?.code;
-    error.details = payload?.error?.details;
+    error.details = payload?.error?.details ?? detail;
     throw error;
   }
 
   return payload as T;
+}
+
+function parseEventPayload(data: string): JobEvent | null {
+  try {
+    return JSON.parse(data) as JobEvent;
+  } catch {
+    return null;
+  }
+}
+
+function resolveV2Url(pathOrUrl: string): string {
+  if (/^https?:\/\//i.test(pathOrUrl)) {
+    return pathOrUrl;
+  }
+
+  try {
+    const base = new URL(DRAWING_API_BASE_URL);
+    const origin = `${base.protocol}//${base.host}`;
+    return new URL(pathOrUrl, origin).toString();
+  } catch {
+    return pathOrUrl;
+  }
+}
+
+function toApiUrl(baseUrl: string, path: string): string {
+  const normalizedBase = baseUrl.replace(/\/+$/, '');
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${normalizedBase}${normalizedPath}`;
 }

@@ -17,13 +17,22 @@ from .base import (
 )
 from .config import ProviderConfig, ProviderConfigError, get_provider_config
 from .mock import MockProviderGateway
+from .openai_text import OpenAITextProviderGateway
 from .placeholders import (
     ComfyUIProviderGateway,
     DashScopeProviderGateway,
     LocalProviderGateway,
     OpenAIProviderGateway,
 )
-from .registry import ProviderBuildResult, create_provider_gateway
+from .registry import ProviderBuildResult, build_openai_text_transport, create_provider_gateway
+from .transports import (
+    FakeTextTransport,
+    OpenAICompatibleTextTransport,
+    TextGenerationRequest,
+    TextGenerationTransport,
+    TransportError,
+    TransportTimeoutError,
+)
 
 __all__ = [
     "GeneratedAssetSpec",
@@ -45,10 +54,18 @@ __all__ = [
     "VisualBriefProvider",
     "WorkflowNodeError",
     "MockProviderGateway",
+    "OpenAITextProviderGateway",
     "OpenAIProviderGateway",
     "DashScopeProviderGateway",
     "ComfyUIProviderGateway",
     "LocalProviderGateway",
+    "TextGenerationRequest",
+    "TextGenerationTransport",
+    "OpenAICompatibleTextTransport",
+    "FakeTextTransport",
+    "TransportError",
+    "TransportTimeoutError",
     "create_provider_gateway",
+    "build_openai_text_transport",
     "get_provider_config",
 ]

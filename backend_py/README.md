@@ -9,10 +9,25 @@
 - 本地 JSON 文件 job store / asset store
 - LangGraph-backed / sequential-fallback mock drawing workflow
 - Provider registry / config / placeholder gateway 框架
+- 可选真实 LLM 文本节点边界
 - File-backed asset content 层
 - `preview_ready` 断点确认
 - `confirm` / `cancel` / `retry` 基础控制
 - 为未来 LangGraph 编排预留清晰模块边界
+
+## Stage 8 文本 LLM Provider 层
+
+- 默认 provider profile 仍是 `mock`
+- 只有在显式设置 `VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS=1` 且配置齐全时，`openai` profile 才会启用真实文本 transport
+- 当前真实 LLM 只覆盖：
+  - `parse_intent`
+  - `build_visual_brief`
+  - `build_image_prompt`
+- preview / final / layer / playback 仍走本地 mock SVG asset provider
+- 这意味着当前是可选的 mixed mode：
+  - live text intelligence
+  - local mock image assets
+- 测试使用 fake transport，不发真实网络请求
 
 ## Stage 6 资产内容层
 
@@ -29,12 +44,13 @@
 - 通过 `VOCASKETCH_PROVIDER_PROFILE` 选择 provider profile
   - 当前支持：`mock`、`openai`、`dashscope`、`comfyui`、`local`
 - `mock` 会正常完成当前整条 mock workflow
-- 非 `mock` profile 目前只会创建 placeholder provider
+- 非 `mock` profile 默认仍走 placeholder provider
   - 不发真实网络请求
   - 不读取或输出 API key
   - 不会静默 fallback 成功
   - 缺少最低限度的非 secret 公共配置时，应用会在启动时 fail fast
-  - 公共配置齐全时，应用可启动，但 job 会在执行节点时明确返回 `ProviderError`
+  - 公共配置齐全但未显式开启 live 请求时，应用可启动，但 job 会在执行节点时明确返回 `ProviderError`
+  - 只有 `openai` profile 在显式 live 开关开启后，才会进入真实文本节点 + mock 资产 mixed mode
 - route 层和 workflow service 层都不感知具体 provider 类型，只依赖统一的 `ProviderGateway`
 
 ## Stage 4 编排层
@@ -82,11 +98,13 @@
 - LangGraph 持久化 checkpoint / human-in-the-loop runtime
 - 真实图层分解算法
 - 真实图像二进制输出
-- 真正可计费或会联网的 OpenAI / DashScope / ComfyUI / 本地生成服务接入
+- 默认运行路径下的真实外部模型调用
+- 真正可计费或会联网的 DashScope / ComfyUI / 本地生成服务接入
+- 真实生图与分层 provider 接入
 
 当前 `assets` 会返回 metadata，并为 mock image asset 生成本地 SVG 文件内容。
-当前仍未接入真实 LLM、真实生图模型、真实分层模型。
-当前已接入 LangGraph 编排边界、provider registry 与 placeholder provider，但不接任何真实外部 provider。
+当前仍未接入真实生图模型、真实分层模型。
+当前已接入 LangGraph 编排边界、provider registry，以及一个可选的真实文本 LLM provider 边界；默认仍不接任何真实外部 provider。
 
 ## 安装依赖
 
@@ -132,6 +150,22 @@ set VOCASKETCH_OPENAI_RESPONSE_MODEL=gpt-placeholder
 set VOCASKETCH_OPENAI_IMAGE_MODEL=image-placeholder
 ```
 
+如果你要显式测试 Stage 8 的 live text provider 边界，需要额外开启：
+
+```bash
+set VOCASKETCH_PROVIDER_PROFILE=openai
+set VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS=1
+set VOCASKETCH_OPENAI_API_BASE_URL=https://api.openai.com/v1
+set VOCASKETCH_OPENAI_API_KEY=your-key
+set VOCASKETCH_OPENAI_RESPONSE_MODEL=gpt-structured-model
+```
+
+注意：
+
+- 默认不要开启 live requests
+- README 示例不要把真实 key 写进仓库
+- 自动化测试仍使用 fake transport，不发网络请求
+
 ## 启动
 
 ```bash
@@ -160,9 +194,10 @@ http://127.0.0.1:8000
 
 - `POST /retry` 当前会记录 `fromPhase` / `reason` 到事件 payload 里，便于审计
 - 但当前 mock retry 仍然会从 `queued` 全量重跑，不会从指定 phase 局部恢复
-- 当前 workflow 内部已按节点拆分，但输出仍是 mock metadata，不是真实图像
-- 当前即使使用 LangGraph-backed runner，也仍然只驱动 mock provider / 本地 SVG mock asset
-- 当前即使选择非 `mock` provider profile，也只会进入 placeholder provider，不会发真实请求
+- 当前 workflow 内部已按节点拆分
+- 当前即使使用 LangGraph-backed runner，preview / final / layers 仍然由本地 SVG mock asset 提供
+- 当前默认 profile 仍不会发真实请求
+- 当前 `openai` profile 只有显式 live 开关开启时，才会让文本节点发起真实请求；自动化测试不会这样做
 - 不要把 API key 写入代码、日志、事件 payload、job metadata 或 README 示例
 
 ## 典型验证流程

@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from .assets.asset_store import AssetStore
 from .config import get_config
@@ -56,6 +57,15 @@ def create_app() -> FastAPI:
         title="VocaSketch Python v2 Backend",
         version="0.2.0",
         lifespan=lifespan,
+    )
+
+    config = get_config()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(config.cors_origins),
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     app.include_router(drawing_jobs_router)
