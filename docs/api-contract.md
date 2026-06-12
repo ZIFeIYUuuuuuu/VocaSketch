@@ -336,6 +336,8 @@ Alternative response for small audio:
 
 Converts recognized text into a confirmation reply and typed drawing operations. This is the main replacement for the frontend `interpretVoiceCommand` mock.
 
+The backend uses a Parser Adapter: control commands are handled by local rules for low latency; complex drawing commands try the configured OpenAI-compatible/sub2api provider first when available, then fall back to local rules on timeout, network failure, invalid JSON, or schema-invalid output. Provider failures should not make this endpoint fail when the local parser can produce a valid response.
+
 Request:
 
 ```json

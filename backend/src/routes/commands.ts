@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import { interpretCommand } from "../parser.js";
+import type { ParserAdapterOptions } from "../parser/parserAdapter.js";
 import {
   commandInterpretationSchema,
   confirmInterpretationSchema,
@@ -12,6 +13,11 @@ import { getInterpretation, saveInterpretation } from "../storage/interpretation
 import { ApiError, asyncHandler, validationError } from "../errors.js";
 
 export const commandsRouter = Router();
+let parserAdapterOptions: ParserAdapterOptions | undefined;
+
+export function setCommandParserOptionsForTest(options: ParserAdapterOptions | undefined) {
+  parserAdapterOptions = options;
+}
 
 type StoredInterpretation = CommandInterpretation & {
   confirmed?: boolean;
@@ -29,7 +35,7 @@ commandsRouter.post(
       throw validationError(parsed.error);
     }
 
-    const interpreted = interpretCommand(parsed.data);
+    const interpreted = await interpretCommand(parsed.data, parserAdapterOptions);
     const output = commandInterpretationSchema.safeParse(interpreted);
     if (!output.success) {
       throw new ApiError({

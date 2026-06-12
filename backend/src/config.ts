@@ -26,6 +26,33 @@ function readPort(): number {
   return port;
 }
 
+function readPositiveInteger(name: string, fallback: number): number {
+  const raw = readOptional(name);
+  if (!raw) {
+    return fallback;
+  }
+
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function readBoolean(name: string, fallback: boolean): boolean {
+  const raw = readOptional(name);
+  if (!raw) {
+    return fallback;
+  }
+
+  return /^(1|true|yes|on)$/i.test(raw);
+}
+
+function readParserProvider(): "auto" | "local" | "openai-compatible" {
+  const raw = readOptional("PARSER_PROVIDER");
+  if (raw === "local" || raw === "openai-compatible" || raw === "auto") {
+    return raw;
+  }
+  return "auto";
+}
+
 export const appConfig = {
   version: "0.1.0",
   env: readOptional("APP_ENV") ?? "development",
@@ -49,6 +76,11 @@ export const appConfig = {
     defaultLocale: "zh-CN",
     maxAudioSeconds: 20,
     maxCommandChars: 500
+  },
+  parser: {
+    provider: readParserProvider(),
+    timeoutMs: readPositiveInteger("OPENAI_COMPATIBLE_TIMEOUT_MS", 8000),
+    costLog: readBoolean("PARSER_COST_LOG", false)
   }
 } as const;
 
