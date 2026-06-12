@@ -8,9 +8,34 @@
 - 基于 SSE 的 drawing job 事件流
 - 本地 JSON 文件 job store / asset store
 - LangGraph-backed / sequential-fallback mock drawing workflow
+- Provider registry / config / placeholder gateway 框架
+- File-backed asset content 层
 - `preview_ready` 断点确认
 - `confirm` / `cancel` / `retry` 基础控制
 - 为未来 LangGraph 编排预留清晰模块边界
+
+## Stage 6 资产内容层
+
+- `GET /api/v2/assets/{assetId}` 继续返回资产 metadata
+- 新增 `GET /api/v2/assets/{assetId}/content` 返回实际内容文件
+- preview / final / layer asset 现在会落本地内容文件，并提供稳定 `contentUrl`
+- 默认 mock provider 生成的是本地 SVG 占位图，`mimeType=image/svg+xml`
+- playback manifest 也会落成本地 JSON 文件，便于调试和前端读取
+- 如果 metadata 存在但内容文件丢失，content endpoint 返回 `410 Gone`
+
+## Stage 5 Provider 层
+
+- 默认 provider profile 是 `mock`
+- 通过 `VOCASKETCH_PROVIDER_PROFILE` 选择 provider profile
+  - 当前支持：`mock`、`openai`、`dashscope`、`comfyui`、`local`
+- `mock` 会正常完成当前整条 mock workflow
+- 非 `mock` profile 目前只会创建 placeholder provider
+  - 不发真实网络请求
+  - 不读取或输出 API key
+  - 不会静默 fallback 成功
+  - 缺少最低限度的非 secret 公共配置时，应用会在启动时 fail fast
+  - 公共配置齐全时，应用可启动，但 job 会在执行节点时明确返回 `ProviderError`
+- route 层和 workflow service 层都不感知具体 provider 类型，只依赖统一的 `ProviderGateway`
 
 ## Stage 4 编排层
 
@@ -38,11 +63,17 @@
   - 对 service 层保持稳定接口
   - 当前已支持按 node 和按 preconfirm/postconfirm flow 编译 graph，但完整 job 生命周期仍由 `workflow.py` 协调
 - `providers/base.py`
-  - 定义 provider gateway 接口与异常类型
+  - 定义 provider gateway 接口、capabilities、runtime info 与异常类型
+- `providers/config.py`
+  - 解析 provider profile 与非 secret 公共配置
+- `providers/registry.py`
+  - 根据 profile 构建默认 mock provider 或 placeholder provider
 - `providers/mock.py`
   - 提供无网络、无 API key 的 mock provider gateway
+- `providers/placeholders.py`
+  - 提供 `OpenAI` / `DashScope` / `ComfyUI` / `Local` 的占位 provider
 - `assets/asset_store.py`
-  - 抽离 preview / final / layer / manifest 资产写入逻辑
+  - 统一管理 preview / final / layer / manifest 的 metadata 与内容文件写入逻辑
 
 ## 当前不包含
 
@@ -51,11 +82,11 @@
 - LangGraph 持久化 checkpoint / human-in-the-loop runtime
 - 真实图层分解算法
 - 真实图像二进制输出
-- OpenAI / DashScope / ComfyUI / 其他 provider 接入
+- 真正可计费或会联网的 OpenAI / DashScope / ComfyUI / 本地生成服务接入
 
-当前 `assets` 仅返回 mock metadata JSON，用于验证前后端交互和 job 生命周期。
+当前 `assets` 会返回 metadata，并为 mock image asset 生成本地 SVG 文件内容。
 当前仍未接入真实 LLM、真实生图模型、真实分层模型。
-当前已接入 LangGraph 编排边界与可选 runtime，但不接任何真实外部 provider。
+当前已接入 LangGraph 编排边界、provider registry 与 placeholder provider，但不接任何真实外部 provider。
 
 ## 安装依赖
 
@@ -87,6 +118,20 @@ pip install -e .[graph]
 set VOCASKETCH_DISABLE_LANGGRAPH=1
 ```
 
+如果你想显式指定 provider profile，可以设置：
+
+```bash
+set VOCASKETCH_PROVIDER_PROFILE=mock
+```
+
+当前非 `mock` profile 只用于验证注册与占位行为。示例：
+
+```bash
+set VOCASKETCH_PROVIDER_PROFILE=openai
+set VOCASKETCH_OPENAI_RESPONSE_MODEL=gpt-placeholder
+set VOCASKETCH_OPENAI_IMAGE_MODEL=image-placeholder
+```
+
 ## 启动
 
 ```bash
@@ -109,13 +154,16 @@ http://127.0.0.1:8000
 - `POST /api/v2/drawing-jobs/{jobId}/cancel`
 - `POST /api/v2/drawing-jobs/{jobId}/retry`
 - `GET /api/v2/assets/{assetId}`
+- `GET /api/v2/assets/{assetId}/content`
 
 说明：
 
 - `POST /retry` 当前会记录 `fromPhase` / `reason` 到事件 payload 里，便于审计
 - 但当前 mock retry 仍然会从 `queued` 全量重跑，不会从指定 phase 局部恢复
 - 当前 workflow 内部已按节点拆分，但输出仍是 mock metadata，不是真实图像
-- 当前即使使用 LangGraph-backed runner，也仍然只驱动 mock provider / mock asset metadata
+- 当前即使使用 LangGraph-backed runner，也仍然只驱动 mock provider / 本地 SVG mock asset
+- 当前即使选择非 `mock` provider profile，也只会进入 placeholder provider，不会发真实请求
+- 不要把 API key 写入代码、日志、事件 payload、job metadata 或 README 示例
 
 ## 典型验证流程
 
@@ -153,12 +201,18 @@ curl http://127.0.0.1:8000/api/v2/drawing-jobs/<jobId>
 curl http://127.0.0.1:8000/api/v2/assets/<assetId>
 ```
 
+6. 拉取 mock asset content
+
+```bash
+curl http://127.0.0.1:8000/api/v2/assets/<assetId>/content
+```
+
 ## 数据目录
 
 - `backend_py/data/jobs/`
 - `backend_py/data/assets/`
 
-这些目录用于本地开发时保存 job、event、asset metadata，已通过 `.gitignore` 忽略。
+这些目录用于本地开发时保存 job、event、asset metadata 以及 asset content 文件，已通过 `.gitignore` 忽略。
 
 ## 下一阶段方向
 
@@ -171,3 +225,5 @@ curl http://127.0.0.1:8000/api/v2/assets/<assetId>
 - layer decomposition node
 - playback manifest builder
 - 真实 LLM / 生图 / 分层 provider
+
+前端下一步可以直接使用 `asset.contentUrl` 显示 preview / final / layers，而不必先读取本地文件路径。

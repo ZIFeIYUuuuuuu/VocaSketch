@@ -73,6 +73,10 @@ class LayerAsset(BaseModel):
     width: int
     height: int
     url: str
+    contentUrl: str | None = None
+    byteSize: int | None = None
+    checksum: str | None = None
+    storagePath: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -115,6 +119,9 @@ class AssetRecord(BaseModel):
     role: str
     mimeType: str
     url: str
+    contentUrl: str | None = None
+    byteSize: int | None = None
+    checksum: str | None = None
     width: int | None = None
     height: int | None = None
     storagePath: str | None = None

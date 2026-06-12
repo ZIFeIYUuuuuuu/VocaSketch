@@ -1,10 +1,38 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Protocol
 
 from ..models import AssetKind, ImagePrompt, ParsedIntent, PlaybackManifest, VisualBrief
 from ..workflows.state import DrawingWorkflowState
+
+
+class ProviderProfile(str, Enum):
+    mock = "mock"
+    openai = "openai"
+    dashscope = "dashscope"
+    comfyui = "comfyui"
+    local = "local"
+
+
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    supports_preview: bool
+    supports_final: bool
+    supports_layer_decomposition: bool
+    supports_playback_manifest: bool
+
+
+@dataclass(frozen=True)
+class ProviderRuntimeInfo:
+    profile: ProviderProfile
+    provider_name: str
+    placeholder: bool
+    network_enabled: bool
+    configured: bool
+    capabilities: ProviderCapabilities
+    safe_settings: dict[str, object]
 
 
 class ProviderError(RuntimeError):
@@ -38,6 +66,8 @@ class GeneratedAssetSpec:
     width: int
     height: int
     storage_path: str | None = None
+    content_bytes: bytes | None = None
+    file_extension: str | None = None
     metadata: dict | None = None
 
 
@@ -76,4 +106,5 @@ class ProviderGateway(
     PlaybackManifestProvider,
     Protocol,
 ):
-    pass
+    @property
+    def runtime_info(self) -> ProviderRuntimeInfo: ...

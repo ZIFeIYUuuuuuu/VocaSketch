@@ -15,6 +15,11 @@ class InvalidIdentifierError(ValueError):
     pass
 
 
+def validate_safe_identifier(identifier: str) -> None:
+    if not SAFE_ID_PATTERN.fullmatch(identifier):
+        raise InvalidIdentifierError(f"unsafe identifier: {identifier}")
+
+
 class JobStore:
     def __init__(self, config: AppConfig) -> None:
         self._config = config
@@ -91,15 +96,15 @@ class JobStore:
         return jobs
 
     def _job_path(self, job_id: str) -> Path:
-        self._validate_safe_id(job_id)
+        validate_safe_identifier(job_id)
         return self._config.jobs_dir / f"{job_id}.json"
 
     def _event_path(self, job_id: str) -> Path:
-        self._validate_safe_id(job_id)
+        validate_safe_identifier(job_id)
         return self._config.jobs_dir / f"{job_id}.events.json"
 
     def _asset_path(self, asset_id: str) -> Path:
-        self._validate_safe_id(asset_id)
+        validate_safe_identifier(asset_id)
         return self._config.assets_dir / f"{asset_id}.json"
 
     @staticmethod
@@ -114,8 +119,3 @@ class JobStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
-
-    @staticmethod
-    def _validate_safe_id(identifier: str) -> None:
-        if not SAFE_ID_PATTERN.fullmatch(identifier):
-            raise InvalidIdentifierError(f"unsafe identifier: {identifier}")

@@ -48,12 +48,18 @@ class Stage4BackendTests(unittest.TestCase):
 
         class _ClientContext:
             def __enter__(self_inner):
-                for patcher in patchers:
-                    patcher.start()
-                self_inner.app = create_app()
-                self_inner.client = TestClient(self_inner.app)
-                self_inner.client.__enter__()
-                return self_inner.client
+                try:
+                    for patcher in patchers:
+                        patcher.start()
+                    self_inner.app = create_app()
+                    self_inner.client = TestClient(self_inner.app)
+                    self_inner.client.__enter__()
+                    return self_inner.client
+                except Exception:
+                    for patcher in reversed(patchers):
+                        patcher.stop()
+                    tempdir.cleanup()
+                    raise
 
             def __exit__(self_inner, exc_type, exc, tb):
                 self_inner.client.__exit__(exc_type, exc, tb)

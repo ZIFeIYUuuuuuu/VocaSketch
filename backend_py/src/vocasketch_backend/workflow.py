@@ -146,7 +146,7 @@ class MockDrawingWorkflowService:
                 "retryOfJobId": source_job.jobId,
                 "fromPhase": from_phase,
                 "reason": reason,
-                "note": "Retry restarts the mock workflow from queued and replays the current graph-backed orchestration path.",
+                "note": "Retry restarts the current mock workflow from queued.",
             },
         )
         await self._event_bus.publish(
@@ -179,6 +179,11 @@ class MockDrawingWorkflowService:
         job = await self._require_active_job(job_id)
         state = await self._drawing_graph.load_state(job)
 
+        # We intentionally keep node-by-node progression in the service layer so
+        # status transitions and user-visible SSE milestones remain stable. The
+        # graph runner also exposes larger preconfirm/postconfirm flows, but
+        # those stay reserved for a later consolidation pass once we can preserve
+        # the same event granularity.
         if job.status in {JobStatus.queued, JobStatus.parsing}:
             state = await self._advance_to_intent_ready(job, state)
             job = await self._require_active_job(job_id)
