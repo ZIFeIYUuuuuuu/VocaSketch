@@ -9,6 +9,7 @@ process.env.PORT = "0";
 
 const { createApp } = await import("./app.js");
 const { ensureStorageReady } = await import("./storage/fileStore.js");
+const { setCommandParserOptionsForTest } = await import("./routes/commands.js");
 
 await ensureStorageReady();
 
@@ -228,6 +229,97 @@ try {
     }
   ]);
 
+  setCommandParserOptionsForTest({
+    provider: "openai-compatible",
+    config: {
+      apiKey: "test-key",
+      baseUrl: "https://example.test/v1",
+      model: "test-model"
+    },
+    fetchImpl: async () =>
+      mockJsonResponse(
+        chatResponse({
+          normalizedText: "创建湖蓝长发少女和樱花水彩背景",
+          intent: "create_avatar",
+          confidence: 0.94,
+          requiresConfirmation: true,
+          needsClarification: false,
+          aiReplyText: "我会绘制湖蓝长发少女和樱花水彩背景，确认开始吗？",
+          traitPatch: {
+            gender: "female",
+            hairLength: "long",
+            hairColor: "blue",
+            eyeColor: "pink",
+            backgroundStyle: "cherry"
+          },
+          operations: [
+            {
+              type: "set_character",
+              patch: {
+                gender: "female",
+                hairLength: "long",
+                hairColor: "blue",
+                eyeColor: "pink",
+                backgroundStyle: "cherry"
+              }
+            },
+            {
+              type: "start_auto_painting",
+              fromProgress: 0
+            }
+          ],
+          affectedLayers: [
+            "layer-sketch",
+            "layer-lineart",
+            "layer-flats",
+            "layer-watercolor",
+            "layer-details",
+            "layer-bg"
+          ]
+        })
+      )
+  });
+
+  const remoteInterpretation = await request(baseUrl, "/commands/interpret", {
+    method: "POST",
+    body: {
+      sessionId: session.body.sessionId,
+      projectId: project.body.projectId,
+      text: "画一个湖蓝色长发的二次元少女，粉色瞳孔，背景有樱花和淡淡水彩晕染",
+      currentState: {
+        drawProgress: 0
+      }
+    }
+  });
+  assert.equal(remoteInterpretation.status, 200);
+  assert.equal(remoteInterpretation.body.intent, "create_avatar");
+  assert.equal(remoteInterpretation.body.costHint.provider, "openai-compatible");
+  assert.equal(remoteInterpretation.body.traitPatch.eyeColor, "pink");
+
+  setCommandParserOptionsForTest({
+    provider: "openai-compatible",
+    config: {
+      apiKey: "test-key",
+      baseUrl: "https://example.test/v1",
+      model: "test-model"
+    },
+    fetchImpl: async () => mockJsonResponse({ choices: [{ message: { content: "not json" } }] })
+  });
+
+  const remoteFallbackInterpretation = await request(baseUrl, "/commands/interpret", {
+    method: "POST",
+    body: {
+      sessionId: session.body.sessionId,
+      projectId: project.body.projectId,
+      text: "把眼睛改成紫色"
+    }
+  });
+  assert.equal(remoteFallbackInterpretation.status, 200);
+  assert.equal(remoteFallbackInterpretation.body.costHint.provider, "local-rule-parser");
+  assert.equal(remoteFallbackInterpretation.body.traitPatch.eyeColor, "purple");
+
+  setCommandParserOptionsForTest(undefined);
+
   const confirmed = await request(
     baseUrl,
     `/commands/${interpretation.body.interpretationId}/confirm`,
@@ -345,6 +437,31 @@ try {
     });
   });
   await fs.rm(storageDir, { recursive: true, force: true });
+}
+
+function chatResponse(content: Record<string, unknown>) {
+  return {
+    choices: [
+      {
+        message: {
+          content: JSON.stringify(content)
+        }
+      }
+    ],
+    usage: {
+      prompt_tokens: 111,
+      completion_tokens: 77
+    }
+  };
+}
+
+function mockJsonResponse(body: unknown) {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: {
+      "content-type": "application/json"
+    }
+  });
 }
 
 async function request(
