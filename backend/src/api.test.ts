@@ -112,10 +112,99 @@ try {
   assert.equal(revisionConflict.body.error.code, "REVISION_CONFLICT");
   assert.equal(revisionConflict.body.error.details.serverRevision, 2);
 
+  const interpretation = await request(baseUrl, "/commands/interpret", {
+    method: "POST",
+    body: {
+      sessionId: session.body.sessionId,
+      projectId: project.body.projectId,
+      clientCommandId: "cmd_api_test_001",
+      text: "把眼睛改成紫色",
+      currentState: {
+        systemState: "等待指令",
+        currentStage: "未开始",
+        drawProgress: 0,
+        paintMode: "auto",
+        config: {},
+        layers: []
+      }
+    }
+  });
+
+  assert.equal(interpretation.status, 200);
+  assert.match(interpretation.body.interpretationId, /^interp_/);
+  assert.equal(interpretation.body.intent, "edit_traits");
+  assert.equal(interpretation.body.traitPatch.eyeColor, "purple");
+  assert.deepEqual(interpretation.body.operations, [
+    {
+      type: "redraw_component",
+      target: "eyes",
+      patch: {
+        eyeColor: "purple"
+      }
+    }
+  ]);
+
+  const confirmed = await request(
+    baseUrl,
+    `/commands/${interpretation.body.interpretationId}/confirm`,
+    {
+      method: "POST",
+      body: {
+        sessionId: session.body.sessionId,
+        projectId: project.body.projectId,
+        confirmed: true,
+        confirmationText: "确认",
+        currentRevision: snapshot.body.serverRevision
+      }
+    }
+  );
+
+  assert.equal(confirmed.status, 200);
+  assert.equal(confirmed.body.confirmed, true);
+  assert.deepEqual(confirmed.body.operations, interpretation.body.operations);
+
+  const rejectTarget = await request(baseUrl, "/commands/interpret", {
+    method: "POST",
+    body: {
+      sessionId: session.body.sessionId,
+      projectId: project.body.projectId,
+      text: "戴上一副红框大圆眼镜"
+    }
+  });
+
+  const rejected = await request(baseUrl, `/commands/${rejectTarget.body.interpretationId}/reject`, {
+    method: "POST",
+    body: {
+      sessionId: session.body.sessionId,
+      projectId: project.body.projectId,
+      reasonText: "不对，取消"
+    }
+  });
+
+  assert.equal(rejected.status, 200);
+  assert.equal(rejected.body.cancelled, true);
+  assert.equal(rejected.body.aiReplyText, "好的，我先不执行这次修改。");
+
+  const invalidInterpretRequest = await request(baseUrl, "/commands/interpret", {
+    method: "POST",
+    body: {
+      text: 42
+    }
+  });
+
+  assert.equal(invalidInterpretRequest.status, 400);
+  assert.equal(invalidInterpretRequest.body.error.code, "REQUEST_INVALID");
+
   const sessionFile = path.join(storageDir, "sessions", `${session.body.sessionId}.json`);
   const projectFile = path.join(storageDir, "projects", `${project.body.projectId}.json`);
+  const interpretationFile = path.join(
+    storageDir,
+    "interpretations",
+    `${interpretation.body.interpretationId}.json`
+  );
   await fs.access(sessionFile);
   await fs.access(projectFile);
+  await fs.access(interpretationFile);
 
   console.log("api tests passed");
 } finally {
