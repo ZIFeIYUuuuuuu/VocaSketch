@@ -8,6 +8,7 @@ import { healthRouter } from "./routes/health.js";
 import { projectsRouter } from "./routes/projects.js";
 import { runtimeConfigRouter } from "./routes/runtimeConfig.js";
 import { sessionsRouter } from "./routes/sessions.js";
+import { audioAssetsRouter, voiceRouter } from "./routes/voice.js";
 
 export function createApp() {
   const app = express();
@@ -31,6 +32,8 @@ export function createApp() {
   app.use("/api/v1/sessions", sessionsRouter);
   app.use("/api/v1/projects", projectsRouter);
   app.use("/api/v1/commands", commandsRouter);
+  app.use("/api/v1/voice", voiceRouter);
+  app.use("/api/v1/assets", audioAssetsRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

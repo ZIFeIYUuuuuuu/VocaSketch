@@ -35,8 +35,11 @@ npm test
 - `POST /api/v1/commands/interpret`
 - `POST /api/v1/commands/{interpretationId}/confirm`
 - `POST /api/v1/commands/{interpretationId}/reject`
+- `POST /api/v1/voice/asr`
+- `POST /api/v1/voice/tts`
+- `GET /api/v1/assets/audio/{filename}`
 
-当前版本使用本地 JSON 文件存储。文本指令解析通过 Parser Adapter 处理：配置 OpenAI-compatible/sub2api 后会优先调用远端模型；未配置、超时、网络失败或模型输出不合法时自动回退到本地规则解析。ASR/TTS 暂未接入真实服务。
+当前版本使用本地 JSON 文件存储。文本指令解析通过 Parser Adapter 处理：配置 OpenAI-compatible/sub2api 后会优先调用远端模型；未配置、超时、网络失败或模型输出不合法时自动回退到本地规则解析。语音 ASR/TTS 通过服务端 DashScope/千问适配器调用，密钥不会暴露给前端。
 
 Parser 相关环境变量：
 
@@ -47,6 +50,13 @@ OPENAI_COMPATIBLE_MODEL=
 OPENAI_COMPATIBLE_TIMEOUT_MS=8000
 PARSER_PROVIDER=auto
 PARSER_COST_LOG=false
+DASHSCOPE_API_KEY=
+DASHSCOPE_ASR_MODEL=qwen3-asr-flash
+DASHSCOPE_TTS_MODEL=qwen3-tts-flash
+VOICE_ASR_TIMEOUT_MS=15000
+VOICE_TTS_TIMEOUT_MS=15000
+VOICE_MAX_AUDIO_MB=10
+VOICE_MAX_TTS_CHARS=300
 ```
 
 默认存储目录：

@@ -6,10 +6,12 @@ import path from "node:path";
 const storageDir = await fs.mkdtemp(path.join(os.tmpdir(), "vocasketch-api-test-"));
 process.env.APP_STORAGE_DIR = storageDir;
 process.env.PORT = "0";
+process.env.DASHSCOPE_API_KEY = "test-dashscope-key";
 
 const { createApp } = await import("./app.js");
 const { ensureStorageReady } = await import("./storage/fileStore.js");
 const { setCommandParserOptionsForTest } = await import("./routes/commands.js");
+const { setVoiceFetchForTest } = await import("./routes/voice.js");
 
 await ensureStorageReady();
 
@@ -414,6 +416,182 @@ try {
   assert.equal(invalidInterpretRequest.status, 400);
   assert.equal(invalidInterpretRequest.body.error.code, "REQUEST_INVALID");
 
+  const asrMissingAudio = await request(baseUrl, "/voice/asr", {
+    method: "POST",
+    formData: {
+      sessionId: session.body.sessionId,
+      projectId: project.body.projectId,
+      locale: "zh-CN",
+      format: "webm"
+    }
+  });
+  assert.equal(asrMissingAudio.status, 400);
+  assert.equal(asrMissingAudio.body.error.code, "REQUEST_INVALID");
+
+  let blockedVoiceFetchCalls = 0;
+  setVoiceFetchForTest(async () => {
+    blockedVoiceFetchCalls += 1;
+    return mockJsonResponse({});
+  });
+  const asrSessionMismatch = await request(baseUrl, "/voice/asr", {
+    method: "POST",
+    formData: {
+      sessionId: "sess_missing",
+      projectId: project.body.projectId,
+      locale: "zh-CN",
+      format: "webm",
+      audio: new Blob([Buffer.from("fake audio")], { type: "audio/webm" })
+    }
+  });
+  assert.equal(asrSessionMismatch.status, 404);
+  assert.equal(asrSessionMismatch.body.error.code, "SESSION_NOT_FOUND");
+  assert.equal(blockedVoiceFetchCalls, 0);
+
+  let asrRequestBody: any;
+  setVoiceFetchForTest(async (_url, init) => {
+    asrRequestBody = JSON.parse(String(init?.body));
+    return mockJsonResponse({
+      id: "asr_request_001",
+      choices: [
+        {
+          message: {
+            content: "画一个蓝色长发女生"
+          }
+        }
+      ]
+    });
+  });
+
+  const asrSuccess = await request(baseUrl, "/voice/asr", {
+    method: "POST",
+    formData: {
+      sessionId: session.body.sessionId,
+      projectId: project.body.projectId,
+      locale: "zh-CN",
+      format: "webm",
+      audio: new Blob([Buffer.from("fake audio")], { type: "audio/webm" })
+    }
+  });
+  assert.equal(asrSuccess.status, 200);
+  assert.equal(asrSuccess.body.transcript, "画一个蓝色长发女生");
+  assert.equal(asrSuccess.body.provider, "dashscope");
+  assert.equal(asrRequestBody.model, "qwen3-asr-flash");
+  assert.equal(asrRequestBody.messages[1].role, "user");
+  assert.equal(asrRequestBody.messages[1].content.length, 1);
+  assert.equal(asrRequestBody.messages[1].content[0].type, "input_audio");
+  assert.equal(asrRequestBody.asr_options.language, "zh");
+  assert.equal(asrRequestBody.asr_options.enable_itn, true);
+  const tmpAudioFiles = await fs.readdir(path.join(storageDir, "audio", "tmp"));
+  assert.equal(tmpAudioFiles.length, 0);
+
+  setVoiceFetchForTest(async () => mockJsonResponse({ error: { message: "provider failed" } }, 500));
+
+  const asrProviderFailure = await request(baseUrl, "/voice/asr", {
+    method: "POST",
+    formData: {
+      sessionId: session.body.sessionId,
+      projectId: project.body.projectId,
+      locale: "zh-CN",
+      format: "webm",
+      audio: new Blob([Buffer.from("fake audio")], { type: "audio/webm" })
+    }
+  });
+  assert.equal(asrProviderFailure.status, 502);
+  assert.equal(asrProviderFailure.body.error.code, "ASR_FAILED");
+
+  const ttsMissingText = await request(baseUrl, "/voice/tts", {
+    method: "POST",
+    body: {
+      sessionId: session.body.sessionId
+    }
+  });
+  assert.equal(ttsMissingText.status, 400);
+  assert.equal(ttsMissingText.body.error.code, "REQUEST_INVALID");
+
+  let ttsRequestBody: any;
+  setVoiceFetchForTest(async (url, init) => {
+    if (String(url).includes("multimodal-generation")) {
+      ttsRequestBody = JSON.parse(String(init?.body));
+      return mockJsonResponse({
+        request_id: "tts_request_001",
+        output: {
+          audio: {
+            url: "https://example.test/tts.wav"
+          }
+        }
+      });
+    }
+    return new Response(Buffer.from("RIFFfakewav"), {
+      status: 200,
+      headers: {
+        "content-type": "audio/wav"
+      }
+    });
+  });
+
+  const ttsSuccess = await request(baseUrl, "/voice/tts", {
+    method: "POST",
+    body: {
+      sessionId: session.body.sessionId,
+      projectId: project.body.projectId,
+      text: "我会绘制蓝色长发女生头像，确认开始吗？",
+      voice: "gentle_female",
+      format: "mp3"
+    }
+  });
+  assert.equal(ttsSuccess.status, 200);
+  assert.equal(ttsSuccess.body.provider, "dashscope");
+  assert.equal(ttsSuccess.body.mimeType, "audio/wav");
+  assert.match(ttsSuccess.body.audioUrl, /\.wav$/);
+  assert.equal(ttsRequestBody.model, "qwen3-tts-flash");
+  assert.equal(ttsRequestBody.input.language_type, "Chinese");
+  assert.equal("parameters" in ttsRequestBody, false);
+
+  const ttsAsset = await fetch(`${baseUrl}${ttsSuccess.body.audioUrl.replace("/api/v1", "")}`);
+  assert.equal(ttsAsset.status, 200);
+  assert.equal(ttsAsset.headers.get("content-type"), "audio/wav");
+
+  setVoiceFetchForTest(async () => mockJsonResponse({ error: { message: "provider failed" } }, 500));
+
+  blockedVoiceFetchCalls = 0;
+  setVoiceFetchForTest(async () => {
+    blockedVoiceFetchCalls += 1;
+    return mockJsonResponse({});
+  });
+  const ttsSessionMismatch = await request(baseUrl, "/voice/tts", {
+    method: "POST",
+    body: {
+      sessionId: "sess_missing",
+      projectId: project.body.projectId,
+      text: "测试语音",
+      voice: "gentle_female",
+      format: "mp3"
+    }
+  });
+  assert.equal(ttsSessionMismatch.status, 404);
+  assert.equal(ttsSessionMismatch.body.error.code, "SESSION_NOT_FOUND");
+  assert.equal(blockedVoiceFetchCalls, 0);
+
+  setVoiceFetchForTest(async () => mockJsonResponse({ error: { message: "provider failed" } }, 500));
+
+  const ttsProviderFailure = await request(baseUrl, "/voice/tts", {
+    method: "POST",
+    body: {
+      sessionId: session.body.sessionId,
+      projectId: project.body.projectId,
+      text: "我会绘制蓝色长发女生头像，确认开始吗？",
+      voice: "gentle_female",
+      format: "mp3"
+    }
+  });
+  assert.equal(ttsProviderFailure.status, 502);
+  assert.equal(ttsProviderFailure.body.error.code, "TTS_FAILED");
+  setVoiceFetchForTest(undefined);
+
+  const traversalAsset = await request(baseUrl, "/assets/audio/..%2Fsecret.mp3");
+  assert.equal(traversalAsset.status, 400);
+  assert.equal(traversalAsset.body.error.code, "REQUEST_INVALID");
+
   const sessionFile = path.join(storageDir, "sessions", `${session.body.sessionId}.json`);
   const projectFile = path.join(storageDir, "projects", `${project.body.projectId}.json`);
   const interpretationFile = path.join(
@@ -455,9 +633,9 @@ function chatResponse(content: Record<string, unknown>) {
   };
 }
 
-function mockJsonResponse(body: unknown) {
+function mockJsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
-    status: 200,
+    status,
     headers: {
       "content-type": "application/json"
     }
@@ -470,14 +648,37 @@ async function request(
   options: {
     method?: string;
     body?: unknown;
+    formData?: Record<string, string | Blob>;
   } = {}
 ) {
+  let body: BodyInit | undefined;
+  let headers: HeadersInit | undefined;
+
+  if (options.formData) {
+    const form = new FormData();
+    for (const [key, value] of Object.entries(options.formData)) {
+      if (value instanceof Blob) {
+        form.append(key, value, `audio.${key === "audio" ? "webm" : "bin"}`);
+      } else {
+        form.append(key, value);
+      }
+    }
+    body = form;
+  } else if (options.body !== undefined) {
+    body = JSON.stringify(options.body);
+    headers = {
+      "content-type": "application/json; charset=utf-8"
+    };
+  } else {
+    headers = {
+      "content-type": "application/json; charset=utf-8"
+    };
+  }
+
   const response = await fetch(`${baseUrl}${pathName}`, {
     method: options.method ?? "GET",
-    headers: {
-      "content-type": "application/json; charset=utf-8"
-    },
-    body: options.body === undefined ? undefined : JSON.stringify(options.body)
+    headers,
+    body
   });
 
   return {
