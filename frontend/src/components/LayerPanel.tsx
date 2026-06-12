@@ -115,7 +115,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                     )}
                   </div>
                   <span className={`text-[10px] font-mono ${isLightMode ? 'text-slate-400' : 'text-[#5c687a]'}`}>
-                    #{layer.id.substring(0, 8)} · Opacity: {layer.visible ? '100' : '0'}%
+                    #{layer.id.substring(0, 8)} · Opacity: {layer.visible ? Math.round(layer.opacity * 100) : 0}%
                   </span>
                 </div>
               </div>
