@@ -38,6 +38,8 @@ User speech
 - save project files and operation history
 - provide stable API boundaries for future model/provider replacement
 
+The current backend PR implements a minimal Node.js service with in-memory sessions, projects, snapshots, and rule-based text command interpretation. It intentionally keeps ASR/TTS, LLM calls, JSON Schema validation, and durable storage as later integration steps.
+
 ## Parser Adapter
 
 The parser adapter converts natural-language instructions into a stable internal DSL.
@@ -47,6 +49,8 @@ The adapter should support provider replacement:
 - OpenAI-compatible endpoint for MVP
 - DashScope or another official provider later
 - local command parser for high-frequency control commands
+
+The current implementation uses the local command parser first so that frontend/backend integration can be tested without external provider keys.
 
 The concrete MVP HTTP API contract is documented in [api-contract.md](api-contract.md).
 

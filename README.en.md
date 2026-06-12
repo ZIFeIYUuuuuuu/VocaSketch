@@ -65,6 +65,7 @@ The project does not use end-to-end image generation as the main drawing path. T
 ├── docs/                        # PRD, design notes, architecture, startup docs
 ├── frontend/                    # Web drawing workspace
 ├── .github/                     # Pull request template
+├── AGENTS.md                    # Repository collaboration and Git operation rules
 ├── .env.example                 # Environment variable example
 ├── .gitignore
 ├── competition-requirements.md  # Competition engineering and submission requirements
@@ -74,7 +75,7 @@ The project does not use end-to-end image generation as the main drawing path. T
 
 ## Current Implementation Status
 
-The repository now includes a runnable frontend drawing workspace prototype. It demonstrates the voice entry point, confirmation flow, drawing stages, layer panel, and local mock command parsing.
+The repository now includes a runnable frontend drawing workspace prototype and a minimal backend API service. The frontend demonstrates the voice entry point, confirmation flow, drawing stages, layer panel, and local mock command parsing. The backend provides session, project, and text command interpretation APIs as the first step toward replacing the frontend mock.
 
 Included:
 
@@ -87,13 +88,15 @@ Included:
 - competition requirement checklist
 - PRD document
 - Vite + React frontend workspace prototype
+- minimal Node.js backend API service
+- local rule-based command interpretation
+- repository collaboration and Git operation rules
 
 Not included yet:
 
-- runnable backend service
 - ASR/TTS integration
 - LLM parser integration
-- project persistence implementation
+- file-based project persistence implementation
 
 ## Startup Guide
 
@@ -111,12 +114,24 @@ Default URL:
 http://localhost:3000
 ```
 
-The backend service is still planned:
+The backend API service can run locally:
 
 ```bash
 cd backend
 npm install
 npm run dev
+```
+
+Default backend URL:
+
+```text
+http://localhost:8787
+```
+
+Health check:
+
+```text
+http://localhost:8787/api/v1/health
 ```
 
 ## Documentation
