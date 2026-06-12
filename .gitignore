@@ -22,6 +22,8 @@ backend_py/data/
 backend_py/.venv/
 backend_py/__pycache__/
 backend_py/src/__pycache__/
+backend_py/tests/__pycache__/
+backend_py/**/*.pyc
 backend_py/src/**/*.pyc
 
 # OS and editor files

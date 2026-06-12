@@ -19,11 +19,13 @@ class AppConfig:
     jobs_dir: Path
     assets_dir: Path
     workflow_step_delay_seconds: float
+    disable_langgraph: bool
 
 
 def get_config() -> AppConfig:
     data_dir = Path(os.getenv("VOCASKETCH_BACKEND_PY_DATA_DIR", _default_data_dir()))
     step_delay = float(os.getenv("VOCASKETCH_WORKFLOW_STEP_DELAY_SECONDS", "0.35"))
+    disable_langgraph = os.getenv("VOCASKETCH_DISABLE_LANGGRAPH", "0").strip().lower() in {"1", "true", "yes", "on"}
 
     return AppConfig(
         app_name="VocaSketch Python v2 Backend",
@@ -34,4 +36,5 @@ def get_config() -> AppConfig:
         jobs_dir=data_dir / "jobs",
         assets_dir=data_dir / "assets",
         workflow_step_delay_seconds=step_delay,
+        disable_langgraph=disable_langgraph,
     )

@@ -105,13 +105,19 @@ class JobEvent(BaseModel):
     timestamp: datetime = Field(default_factory=utc_now)
 
 
+AssetKind = Literal["preview", "final", "layer", "manifest"]
+
+
 class AssetRecord(BaseModel):
     assetId: str
     jobId: str
-    kind: Literal["preview", "final", "layer", "manifest"]
+    kind: AssetKind
     role: str
     mimeType: str
     url: str
+    width: int | None = None
+    height: int | None = None
+    storagePath: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     createdAt: datetime = Field(default_factory=utc_now)
 
@@ -131,6 +137,7 @@ class DrawingJob(BaseModel):
     imagePrompt: ImagePrompt | None = None
     previewAssetId: str | None = None
     finalAssetId: str | None = None
+    playbackManifestAssetId: str | None = None
     layerAssets: list[LayerAsset] = Field(default_factory=list)
     playbackManifest: PlaybackManifest | None = None
     requiresConfirmation: bool = False
