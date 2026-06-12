@@ -44,8 +44,13 @@ import type { CommandInterpretation, DrawingOperation, ProjectHistoryEntry } fro
 const SpeechRecognitionAPI =
   (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4000/api/v1';
 const SESSION_STORAGE_KEY = 'vocasketch.sessionId';
 const PROJECT_STORAGE_KEY = 'vocasketch.projectId';
+const AUTO_RECORD_MAX_MS = 6500;
+const AUTO_RECORD_MIN_MS = 900;
+const SILENCE_AFTER_SPEECH_MS = 950;
+const SPEECH_LEVEL_THRESHOLD = 0.035;
 const STAGE_BOUNDARIES = {
   sketchDone: 25,
   lineDone: 50,
@@ -117,7 +122,22 @@ export default function App() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaChunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
+  const realtimeSocketRef = useRef<WebSocket | null>(null);
+  const realtimeAudioContextRef = useRef<AudioContext | null>(null);
+  const realtimeSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const realtimeProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const realtimeFinalTranscriptRef = useRef<string>('');
+  const realtimePartialTranscriptRef = useRef<string>('');
+  const realtimeStoppingRef = useRef<boolean>(false);
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
+  const recorderStopRequestedRef = useRef<boolean>(false);
+  const recorderStopHandledRef = useRef<boolean>(false);
+  const recorderAutoStopTimerRef = useRef<number | null>(null);
+  const recorderLevelTimerRef = useRef<number | null>(null);
+  const recordingAudioContextRef = useRef<AudioContext | null>(null);
+  const recordingStartedAtRef = useRef<number>(0);
+  const lastSpeechAtRef = useRef<number>(0);
+  const hasDetectedSpeechRef = useRef<boolean>(false);
 
   // Painting drawing loop timer ref
   const paintTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -151,6 +171,109 @@ export default function App() {
       setLastRedrawTarget(null);
       redrawPulseTimerRef.current = null;
     }, 2000);
+  };
+
+  const clearRecorderTimers = () => {
+    if (recorderAutoStopTimerRef.current !== null) {
+      window.clearTimeout(recorderAutoStopTimerRef.current);
+      recorderAutoStopTimerRef.current = null;
+    }
+    if (recorderLevelTimerRef.current !== null) {
+      window.clearInterval(recorderLevelTimerRef.current);
+      recorderLevelTimerRef.current = null;
+    }
+  };
+
+  const closeRecordingAudioContext = () => {
+    const audioContext = recordingAudioContextRef.current;
+    recordingAudioContextRef.current = null;
+    if (audioContext && audioContext.state !== 'closed') {
+      void audioContext.close();
+    }
+  };
+
+  const cleanupRecordingResources = () => {
+    clearRecorderTimers();
+    closeRecordingAudioContext();
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+  };
+
+  const requestRecorderStop = (reason: 'manual' | 'silence' | 'timeout') => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === 'inactive' || recorderStopRequestedRef.current) {
+      return;
+    }
+
+    recorderStopRequestedRef.current = true;
+    clearRecorderTimers();
+    if (reason === 'silence') {
+      pushLog('system', '检测到说话结束，正在自动提交语音识别。');
+    } else if (reason === 'timeout') {
+      pushLog('system', '录音窗口结束，正在自动提交语音识别。');
+    } else {
+      pushLog('system', '手动结束录音，正在提交语音识别。');
+    }
+    recorder.stop();
+  };
+
+  const startSpeechAutoStopMonitor = (stream: MediaStream) => {
+    const AudioContextCtor = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextCtor) {
+      recorderAutoStopTimerRef.current = window.setTimeout(() => {
+        requestRecorderStop('timeout');
+      }, AUTO_RECORD_MAX_MS);
+      return;
+    }
+
+    try {
+      const audioContext = new AudioContextCtor();
+      recordingAudioContextRef.current = audioContext;
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.35;
+      const source = audioContext.createMediaStreamSource(stream);
+      source.connect(analyser);
+      const samples = new Uint8Array(analyser.fftSize);
+      recordingStartedAtRef.current = performance.now();
+      lastSpeechAtRef.current = recordingStartedAtRef.current;
+      hasDetectedSpeechRef.current = false;
+
+      recorderLevelTimerRef.current = window.setInterval(() => {
+        analyser.getByteTimeDomainData(samples);
+        let sum = 0;
+        for (const sample of samples) {
+          const normalized = (sample - 128) / 128;
+          sum += normalized * normalized;
+        }
+        const level = Math.sqrt(sum / samples.length);
+        const now = performance.now();
+        const elapsed = now - recordingStartedAtRef.current;
+
+        if (level > SPEECH_LEVEL_THRESHOLD) {
+          hasDetectedSpeechRef.current = true;
+          lastSpeechAtRef.current = now;
+        }
+
+        if (
+          hasDetectedSpeechRef.current &&
+          elapsed > AUTO_RECORD_MIN_MS &&
+          now - lastSpeechAtRef.current > SILENCE_AFTER_SPEECH_MS
+        ) {
+          requestRecorderStop('silence');
+          return;
+        }
+
+        if (elapsed > AUTO_RECORD_MAX_MS) {
+          requestRecorderStop('timeout');
+        }
+      }, 120);
+    } catch (error) {
+      console.warn('Audio level monitor failed; falling back to timed recording.', error);
+      recorderAutoStopTimerRef.current = window.setTimeout(() => {
+        requestRecorderStop('timeout');
+      }, AUTO_RECORD_MAX_MS);
+    }
   };
 
   const playAssistantSpeech = async (text: string) => {
@@ -224,6 +347,7 @@ export default function App() {
       if (redrawPulseTimerRef.current) {
         clearTimeout(redrawPulseTimerRef.current);
       }
+      cleanupRecordingResources();
     };
   }, []);
 
@@ -1297,7 +1421,7 @@ export default function App() {
   const toggleSpeechRecognition = async () => {
     if (isListening) {
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-        mediaRecorderRef.current.stop();
+        requestRecorderStop('manual');
         return;
       }
       if (recognitionRef.current) {
@@ -1315,6 +1439,8 @@ export default function App() {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         streamRef.current = stream;
         mediaChunksRef.current = [];
+        recorderStopRequestedRef.current = false;
+        recorderStopHandledRef.current = false;
         const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
         const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
         mediaRecorderRef.current = recorder;
@@ -1326,23 +1452,43 @@ export default function App() {
         };
 
         recorder.onstop = () => {
+          if (recorderStopHandledRef.current) {
+            return;
+          }
+          recorderStopHandledRef.current = true;
           const blob = new Blob(mediaChunksRef.current, { type: mimeType || 'audio/webm' });
           mediaChunksRef.current = [];
-          streamRef.current?.getTracks().forEach((track) => track.stop());
-          streamRef.current = null;
+          cleanupRecordingResources();
           mediaRecorderRef.current = null;
           setIsListening(false);
+          if (blob.size === 0) {
+            setSystemState('等待指令');
+            setUserSpeechSub('没有录到有效语音，请再试一次。');
+            pushLog('system', '本次录音为空，未提交 ASR。');
+            return;
+          }
           void handleRecordedAudio(blob);
+        };
+
+        recorder.onerror = (event) => {
+          console.warn('MediaRecorder error', event);
+          cleanupRecordingResources();
+          mediaRecorderRef.current = null;
+          setIsListening(false);
+          setSystemState('等待指令');
+          pushLog('system', '浏览器录音出错，已停止本次录音。');
         };
 
         setMicError(null);
         setIsListening(true);
         setSystemState('聆听中');
-        setUserSpeechSub('正在录入您的普通话...');
-        pushLog('system', '🎙️ 麦克风已捕获，使用后端 ASR 录音中。再次点击结束。');
-        recorder.start();
+        setUserSpeechSub('正在录入您的普通话，说完会自动识别...');
+        pushLog('system', '🎙️ 麦克风已捕获，使用后端 ASR 自动录音中。说完会自动提交，也可再次点击手动结束。');
+        recorder.start(250);
+        startSpeechAutoStopMonitor(stream);
       } catch (error) {
         console.warn('MediaRecorder unavailable; falling back to Web Speech.', error);
+        cleanupRecordingResources();
         startWebSpeechFallback();
       }
     }
