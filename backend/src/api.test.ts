@@ -7,6 +7,8 @@ const storageDir = await fs.mkdtemp(path.join(os.tmpdir(), "vocasketch-api-test-
 process.env.APP_STORAGE_DIR = storageDir;
 process.env.PORT = "0";
 process.env.DASHSCOPE_API_KEY = "test-dashscope-key";
+process.env.DASHSCOPE_ASR_MODEL = "paraformer-realtime-8k-v2";
+process.env.PARSER_PROVIDER = "local";
 
 const { createApp } = await import("./app.js");
 const { ensureStorageReady } = await import("./storage/fileStore.js");
@@ -475,7 +477,7 @@ try {
   assert.equal(asrSuccess.status, 200);
   assert.equal(asrSuccess.body.transcript, "画一个蓝色长发女生");
   assert.equal(asrSuccess.body.provider, "dashscope");
-  assert.equal(asrRequestBody.model, "qwen3-asr-flash");
+  assert.equal(asrRequestBody.model, "paraformer-realtime-8k-v2");
   assert.equal(asrRequestBody.messages[1].role, "user");
   assert.equal(asrRequestBody.messages[1].content.length, 1);
   assert.equal(asrRequestBody.messages[1].content[0].type, "input_audio");

@@ -84,7 +84,7 @@ export const appConfig = {
   },
   voice: {
     dashscopeApiKey: readOptional("DASHSCOPE_API_KEY"),
-    asrModel: readOptional("DASHSCOPE_ASR_MODEL") ?? "qwen3-asr-flash",
+    asrModel: readOptional("DASHSCOPE_ASR_MODEL") ?? "paraformer-realtime-8k-v2",
     ttsModel: readOptional("DASHSCOPE_TTS_MODEL") ?? "qwen3-tts-flash",
     asrTimeoutMs: readPositiveInteger("VOICE_ASR_TIMEOUT_MS", 15000),
     ttsTimeoutMs: readPositiveInteger("VOICE_TTS_TIMEOUT_MS", 15000),
