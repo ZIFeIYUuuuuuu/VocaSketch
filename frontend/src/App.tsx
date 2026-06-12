@@ -25,10 +25,29 @@ import { StatusIndicator } from './components/StatusIndicator';
 import { VoiceController } from './components/VoiceController';
 import { DemoScriptPanel } from './components/DemoScriptPanel';
 import { CharacterConfig, DrawStage, PaintLayer, SystemState, VoiceLog } from './types';
+import {
+  confirmInterpretation,
+  createProject,
+  createSession,
+  interpretCommand as interpretCommandRemote,
+  rejectInterpretation,
+  saveProjectSnapshot
+} from './api/client';
+import type { CommandInterpretation, DrawingOperation } from './api/types';
 
 // Web Speech SpeechRecognition typed definition helper
 const SpeechRecognitionAPI =
   (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+const getBrowserClientId = () => {
+  const storageKey = 'vocasketch-client-id';
+  const existing = window.localStorage.getItem(storageKey);
+  if (existing) return existing;
+
+  const next = `browser_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  window.localStorage.setItem(storageKey, next);
+  return next;
+};
 
 export default function App() {
   // -------------------------------------------------------------------------
@@ -53,6 +72,8 @@ export default function App() {
   const [pendingConfig, setPendingConfig] = useState<Partial<CharacterConfig> | null>(null);
   const [isAwaitingConfirm, setIsAwaitingConfirm] = useState<boolean>(false);
   const [pendingVerb, setPendingVerb] = useState<'create' | 'edit' | 'accessory' | null>(null);
+  const [pendingInterpretationId, setPendingInterpretationId] = useState<string | null>(null);
+  const [pendingOperations, setPendingOperations] = useState<DrawingOperation[]>([]);
 
   // Layout Layers state
   const [layers, setLayers] = useState<PaintLayer[]>([
@@ -73,6 +94,11 @@ export default function App() {
   const [currentStage, setCurrentStage] = useState<DrawStage>('未开始');
   const [systemState, setSystemState] = useState<SystemState>('等待指令');
   const [paintMode, setPaintMode] = useState<'auto' | 'stages'>('auto');
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [serverRevision, setServerRevision] = useState<number>(1);
+  const [apiOnline, setApiOnline] = useState<boolean>(false);
+  const [apiError, setApiError] = useState<string | null>(null);
 
   // Multi-line subtitles & logs
   const [userSpeechSub, setUserSpeechSub] = useState<string>('');
@@ -110,6 +136,45 @@ export default function App() {
     pushLog('system', '🎨 AI 语音数位绘画工作台控制引擎就绪。');
     pushLog('system', '您可以开启麦克风或点击右侧【快捷剧本模拟】体验高精绘图。');
     pushLog('ai', '您好，我是您的数位绘画助理。说出指令如“画一个蓝色长发女生半身像，水彩素描风”，我们即可开始创作！');
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const bootstrapBackendProject = async () => {
+      try {
+        const session = await createSession({
+          clientId: getBrowserClientId(),
+          locale: 'zh-CN'
+        });
+        const project = await createProject({
+          sessionId: session.sessionId,
+          title: '未命名语音头像',
+          initialConfig: characterConfig
+        });
+
+        if (cancelled) return;
+
+        setSessionId(session.sessionId);
+        setProjectId(project.projectId);
+        setServerRevision(project.serverRevision);
+        setApiOnline(true);
+        setApiError(null);
+        pushLog('system', '后端指令解析已连接，会话与工程已建立。');
+      } catch (error) {
+        if (cancelled) return;
+
+        setApiOnline(false);
+        setApiError(error instanceof Error ? error.message : '后端不可用');
+        pushLog('system', '后端不可用，已切换本地演示解析。');
+      }
+    };
+
+    bootstrapBackendProject();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Sync canvas progress with Stage Enum
@@ -201,12 +266,80 @@ export default function App() {
   // -------------------------------------------------------------------------
   // 4. CLIENT NLP INTERPRETATION STATE-MACHINE (本地语音语义理解状态机)
   // -------------------------------------------------------------------------
-  const interpretVoiceCommand = (rawText: string) => {
+  const interpretVoiceCommand = async (rawText: string) => {
     const text = rawText.trim();
     if (!text) return;
 
     pushLog('user', text);
     setUserSpeechSub(text);
+    setSystemState('思考中');
+
+    if (/确定|确认|ok|好的|开始|没错|绘制|可以/.test(text) && isAwaitingConfirm) {
+      await handleConfirmAction();
+      return;
+    }
+
+    if (/取消|放弃|不要了|不画了|不对|不对劲|错了/.test(text)) {
+      await rejectPendingInterpretation(text);
+      setIsAwaitingConfirm(false);
+      setPendingConfig(null);
+      setPendingVerb(null);
+      setPendingInterpretationId(null);
+      setPendingOperations([]);
+      setSystemState('等待指令');
+      setUserSpeechSub(text);
+      setAiSpeechSub('好的，已撤销当前的待办指令，随时为您待命。');
+      pushLog('ai', '已为您撤销前面的操作。');
+      return;
+    }
+
+    if (!sessionId || !projectId) {
+      pushLog('system', '后端解析不可用，已切换本地演示解析。');
+      interpretVoiceCommandLocal(text, { shouldLogUser: false });
+      return;
+    }
+
+    try {
+      const interpretation = await interpretCommandRemote({
+        sessionId,
+        projectId,
+        text,
+        currentState: {
+          systemState,
+          currentStage,
+          drawProgress,
+          paintMode,
+          config: characterConfig,
+          layers
+        }
+      });
+
+      if (!Array.isArray(interpretation.operations)) {
+        throw new Error('后端指令缺少 operations。');
+      }
+
+      setApiOnline(true);
+      setApiError(null);
+      applyRemoteInterpretation(interpretation);
+    } catch (error) {
+      setApiOnline(false);
+      setApiError(error instanceof Error ? error.message : '后端解析失败');
+      pushLog('system', '后端解析不可用，已切换本地演示解析。');
+      interpretVoiceCommandLocal(text, { shouldLogUser: false });
+    }
+  };
+
+  const interpretVoiceCommandLocal = (
+    rawText: string,
+    options: { shouldLogUser?: boolean } = {}
+  ) => {
+    const text = rawText.trim();
+    if (!text) return;
+
+    if (options.shouldLogUser ?? true) {
+      pushLog('user', text);
+      setUserSpeechSub(text);
+    }
     setSystemState('思考中');
 
     // Simulate AI semantic thinking delay (1 second)
@@ -400,11 +533,183 @@ export default function App() {
     }, 1100);
   };
 
+  const applyRemoteInterpretation = (interpretation: CommandInterpretation) => {
+    pushLog('ai', interpretation.aiReplyText);
+    setAiSpeechSub(interpretation.aiReplyText);
+
+    if (interpretation.needsClarification) {
+      setPendingInterpretationId(null);
+      setPendingOperations([]);
+      setPendingConfig(null);
+      setPendingVerb(null);
+      setIsAwaitingConfirm(false);
+      setSystemState('等待指令');
+      return;
+    }
+
+    if (interpretation.requiresConfirmation) {
+      setPendingInterpretationId(interpretation.interpretationId);
+      setPendingOperations(interpretation.operations);
+      setPendingConfig(interpretation.traitPatch ?? null);
+      setPendingVerb(interpretation.intent === 'create_avatar' ? 'create' : 'edit');
+      setIsAwaitingConfirm(true);
+      setSystemState('等待确认');
+      return;
+    }
+
+    setPendingInterpretationId(null);
+    setPendingOperations([]);
+    setPendingConfig(null);
+    setPendingVerb(null);
+    setIsAwaitingConfirm(false);
+    executeOperations(interpretation.operations);
+  };
+
+  const executeOperations = (operations: DrawingOperation[]) => {
+    if (operations.length === 0) {
+      setSystemState('等待指令');
+      return;
+    }
+
+    for (const operation of operations) {
+      switch (operation.type) {
+        case 'set_character':
+          setHistory((prev) => [...prev, characterConfig]);
+          setRedoStack([]);
+          setCharacterConfig((prev) => ({ ...prev, ...operation.patch }));
+          break;
+        case 'start_auto_painting':
+          pushLog('system', '后端确认创建任务，启动自动绘画流程。');
+          startPaintingLoop(operation.fromProgress ?? 0);
+          break;
+        case 'start_stage_painting':
+          pushLog('system', '后端确认分阶段绘画任务，继续当前绘制进度。');
+          startPaintingLoop(drawProgress);
+          break;
+        case 'redraw_component':
+          setHistory((prev) => [...prev, characterConfig]);
+          setRedoStack([]);
+          setCharacterConfig((prev) => ({ ...prev, ...operation.patch }));
+          pushLog('system', `后端确认局部组件重绘：${operation.target}`);
+          startPaintingLoop(70);
+          break;
+        case 'set_layer_visibility':
+          setLayers((prev) =>
+            prev.map((layer) =>
+              layer.id === operation.layerId ? { ...layer, visible: operation.visible } : layer
+            )
+          );
+          break;
+        case 'set_layer_opacity':
+          setLayers((prev) =>
+            prev.map((layer) =>
+              layer.id === operation.layerId ? { ...layer, opacity: operation.opacity } : layer
+            )
+          );
+          break;
+        case 'pause':
+          handlePauseResume(true);
+          break;
+        case 'resume':
+          handlePauseResume(false);
+          break;
+        case 'undo':
+          handleUndo();
+          break;
+        case 'redo':
+          handleRedo();
+          break;
+        case 'replay':
+          handleReplay();
+          break;
+        case 'export':
+          handleExport();
+          break;
+      }
+    }
+  };
+
+  const rejectPendingInterpretation = async (reasonText: string) => {
+    if (!pendingInterpretationId) return;
+
+    try {
+      await rejectInterpretation({
+        interpretationId: pendingInterpretationId,
+        sessionId: sessionId ?? undefined,
+        projectId: projectId ?? undefined,
+        reasonText
+      });
+    } catch (error) {
+      pushLog('system', '后端拒绝确认同步失败，本地已取消待执行指令。');
+    }
+  };
+
+  const saveSnapshotAfterOperations = async () => {
+    if (!sessionId || !projectId) return;
+
+    try {
+      const snapshot = await saveProjectSnapshot({
+        projectId,
+        sessionId,
+        config: characterConfig,
+        layers,
+        drawProgress,
+        currentStage,
+        clientRevision: serverRevision
+      });
+      setServerRevision(snapshot.serverRevision);
+    } catch (error) {
+      pushLog('system', '工程快照保存失败，绘图操作已在本地继续。');
+    }
+  };
+
   // -------------------------------------------------------------------------
   // 5. DECISION ENGINE - CONFIRMS & DEVIATIONS
   // -------------------------------------------------------------------------
-  const handleConfirmAction = () => {
+  const clearPendingCommand = () => {
+    setIsAwaitingConfirm(false);
+    setPendingConfig(null);
+    setPendingVerb(null);
+    setPendingInterpretationId(null);
+    setPendingOperations([]);
+  };
+
+  const handleConfirmAction = async () => {
     if (!isAwaitingConfirm) return;
+
+    if (pendingInterpretationId && sessionId && projectId) {
+      const fallbackOperations = pendingOperations;
+      const fallbackConfig = pendingConfig;
+
+      try {
+        const confirmed = await confirmInterpretation({
+          interpretationId: pendingInterpretationId,
+          sessionId,
+          projectId,
+          confirmed: true,
+          confirmationText: '确认',
+          currentRevision: serverRevision
+        });
+
+        clearPendingCommand();
+        setServerRevision(confirmed.serverRevision);
+        pushLog('ai', confirmed.aiReplyText);
+        setAiSpeechSub(confirmed.aiReplyText);
+        executeOperations(confirmed.operations);
+        void saveSnapshotAfterOperations();
+        return;
+      } catch (error) {
+        pushLog('system', '后端确认失败，使用本地待执行指令继续演示。');
+        clearPendingCommand();
+        if (fallbackOperations.length > 0) {
+          executeOperations(fallbackOperations);
+          return;
+        }
+        if (fallbackConfig) {
+          setPendingConfig(fallbackConfig);
+        }
+      }
+    }
 
     // Backup current traits to Undo history prior to execution
     setHistory((prev) => [...prev, characterConfig]);
@@ -413,9 +718,7 @@ export default function App() {
     const verb = pendingVerb;
     const nextCfg = pendingConfig;
 
-    setIsAwaitingConfirm(false);
-    setPendingConfig(null);
-    setPendingVerb(null);
+    clearPendingCommand();
 
     // Apply the traits
     if (nextCfg) {
@@ -657,7 +960,9 @@ export default function App() {
 
             <div className={`text-xs font-mono flex items-center gap-2 ${isLightMode ? 'text-slate-600' : 'text-[#969ba8]'}`}>
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-              <span>ASR 普通话离线推理服务已就绪</span>
+              <span title={apiError ?? undefined}>
+                {apiOnline ? '后端指令解析已连接' : '本地演示解析待命'}
+              </span>
             </div>
           </div>
 
@@ -728,11 +1033,12 @@ export default function App() {
                 systemState={systemState}
                 isListening={isListening}
                 isAwaitingConfirm={isAwaitingConfirm}
-                onConfirmAction={handleConfirmAction}
+                onConfirmAction={() => {
+                  void handleConfirmAction();
+                }}
                 onCancelAction={() => {
-                  setIsAwaitingConfirm(false);
-                  setPendingConfig(null);
-                  setPendingVerb(null);
+                  void rejectPendingInterpretation('取消');
+                  clearPendingCommand();
                   setSystemState('等待指令');
                   setAiSpeechSub('好的，当前操作已取消，随时等候您的下一步指令。');
                   pushLog('ai', '已取消前面的操作。');
@@ -854,7 +1160,9 @@ export default function App() {
             <DemoScriptPanel
               systemState={systemState}
               onSimulateCommand={handleSimulateCommand}
-              onSimulateConfirm={handleConfirmAction}
+              onSimulateConfirm={() => {
+                void handleConfirmAction();
+              }}
               isAwaitingConfirm={isAwaitingConfirm}
               isLightMode={isLightMode}
             />
