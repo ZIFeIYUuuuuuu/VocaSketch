@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+
 import { interpretCommand } from "./parser.js";
 
 const createResult = interpretCommand({
@@ -10,10 +11,10 @@ const createResult = interpretCommand({
 
 assert.equal(createResult.intent, "create_avatar");
 assert.equal(createResult.requiresConfirmation, true);
-assert.equal(createResult.traitPatch.hairColor, "blue");
-assert.equal(createResult.traitPatch.hairLength, "long");
-assert.equal(createResult.traitPatch.gender, "female");
-assert.equal(createResult.traitPatch.backgroundStyle, "watercolor");
+assert.equal(createResult.traitPatch?.hairColor, "blue");
+assert.equal(createResult.traitPatch?.hairLength, "long");
+assert.equal(createResult.traitPatch?.gender, "female");
+assert.equal(createResult.traitPatch?.backgroundStyle, "watercolor");
 assert.equal(createResult.operations.length, 2);
 
 const pauseResult = interpretCommand({

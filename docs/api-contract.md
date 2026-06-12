@@ -189,6 +189,7 @@ Response:
   "layers": [],
   "drawProgress": 0,
   "currentStage": "未开始",
+  "serverRevision": 1,
   "createdAt": "2026-06-12T02:00:00.000Z",
   "updatedAt": "2026-06-12T02:00:00.000Z"
 }
@@ -199,6 +200,8 @@ Response:
 `GET /api/v1/projects/{projectId}?sessionId={sessionId}`
 
 Returns the saved project state for restoring the workspace.
+
+`sessionId` is optional for the local demo restore path. When provided, the backend validates that the project belongs to that session and returns `SESSION_PROJECT_MISMATCH` if it does not.
 
 Response:
 
@@ -212,6 +215,8 @@ Response:
   "drawProgress": 100,
   "currentStage": "已完成",
   "historyCount": 6,
+  "serverRevision": 2,
+  "createdAt": "2026-06-12T02:00:00.000Z",
   "updatedAt": "2026-06-12T02:05:00.000Z"
 }
 ```

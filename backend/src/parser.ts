@@ -1,4 +1,40 @@
-import { makeId } from "./store.js";
+import { makeId } from "./storage/ids.js";
+
+type DrawingOperation =
+  | { type: "set_character"; patch: Record<string, string> }
+  | { type: "start_auto_painting"; fromProgress: number }
+  | { type: "redraw_component"; target: string; patch: Record<string, string> }
+  | { type: "pause" | "resume" | "undo" | "redo" | "replay" | "export" };
+
+interface InterpretRequest {
+  sessionId?: string;
+  projectId?: string;
+  text?: string;
+  currentState?: {
+    drawProgress?: number;
+  };
+}
+
+interface InterpretResult {
+  interpretationId: string;
+  sessionId: string;
+  projectId: string;
+  transcript: string;
+  normalizedText: string;
+  intent: string;
+  confidence: number;
+  requiresConfirmation: boolean;
+  needsClarification: boolean;
+  aiReplyText: string;
+  clarificationQuestion?: string;
+  traitPatch?: Record<string, string>;
+  operations: DrawingOperation[];
+  affectedLayers: string[];
+  costHint: {
+    provider: string;
+    cacheHit: boolean;
+  };
+}
 
 const affectedPaintLayers = [
   "layer-sketch",
@@ -18,20 +54,9 @@ const colorMap = [
   ["白", "white"],
   ["绿", "green"],
   ["红", "red"]
-];
+] as const;
 
-export const defaultCharacterConfig = {
-  gender: "female",
-  hairLength: "long",
-  hairColor: "blue",
-  eyeColor: "blue",
-  expression: "微笑",
-  outfit: "school",
-  accessory: "none",
-  backgroundStyle: "watercolor"
-};
-
-export function interpretCommand(request) {
+export function interpretCommand(request: InterpretRequest): InterpretResult {
   const text = (request.text ?? "").trim();
   const normalizedText = normalizeText(text);
   const sessionId = request.sessionId ?? "sess_demo";
@@ -68,7 +93,7 @@ export function interpretCommand(request) {
     return clarify(sessionId, projectId, text, "你想创建角色、修改颜色，还是控制暂停和继续？");
   }
 
-  const operations = [];
+  const operations: DrawingOperation[] = [];
   if (hasPatch) {
     operations.push({ type: "set_character", patch });
   }
@@ -104,11 +129,11 @@ export function interpretCommand(request) {
   };
 }
 
-function normalizeText(text) {
+function normalizeText(text: string): string {
   return text.replace(/\s+/g, "").replace(/[，。！？,.!?]/g, "");
 }
 
-function parseControl(text) {
+function parseControl(text: string): DrawingOperation | null {
   if (/暂停|停一下|先停/.test(text)) return { type: "pause" };
   if (/继续|恢复/.test(text)) return { type: "resume" };
   if (/撤销|上一步|退回/.test(text)) return { type: "undo" };
@@ -118,8 +143,8 @@ function parseControl(text) {
   return null;
 }
 
-function parseTraitPatch(text) {
-  const patch = {};
+function parseTraitPatch(text: string): Record<string, string> {
+  const patch: Record<string, string> = {};
 
   if (/男生|男性|男孩/.test(text)) patch.gender = "male";
   if (/女生|女性|女孩|少女/.test(text)) patch.gender = "female";
@@ -156,7 +181,7 @@ function parseTraitPatch(text) {
   return patch;
 }
 
-function findColorBefore(text, target) {
+function findColorBefore(text: string, target: string): string | undefined {
   for (const [keyword, value] of colorMap) {
     if (text.includes(`${keyword}色${target}`) || text.includes(`${keyword}${target}`)) {
       return value;
@@ -165,7 +190,7 @@ function findColorBefore(text, target) {
   return undefined;
 }
 
-function findHairColor(text) {
+function findHairColor(text: string): string | undefined {
   for (const [keyword, value] of colorMap) {
     const pattern = new RegExp(`${keyword}色?(长发|短发|中长发|中发|头发|发)`);
     if (pattern.test(text)) {
@@ -175,7 +200,7 @@ function findHairColor(text) {
   return undefined;
 }
 
-function inferRedrawTarget(text) {
+function inferRedrawTarget(text: string): string {
   if (/眼/.test(text)) return "eyes";
   if (/表情|笑|害羞|冷淡|惊讶/.test(text)) return "expression";
   if (/衣|校服|卫衣|衬衫/.test(text)) return "outfit";
@@ -184,15 +209,17 @@ function inferRedrawTarget(text) {
   return "hair";
 }
 
-function targetToLayer(target) {
+function targetToLayer(target: string): string {
   if (target === "background") return "layer-bg";
-  if (target === "eyes" || target === "expression" || target === "accessory") return "layer-details";
+  if (target === "eyes" || target === "expression" || target === "accessory") {
+    return "layer-details";
+  }
   if (target === "outfit") return "layer-flats";
   return "layer-lineart";
 }
 
-function buildConfirmationReply(patch, isCreate) {
-  const parts = [];
+function buildConfirmationReply(patch: Record<string, string>, isCreate: boolean): string {
+  const parts: string[] = [];
   if (patch.gender) parts.push(genderText(patch.gender));
   if (patch.hairLength) parts.push(lengthText(patch.hairLength));
   if (patch.hairColor) parts.push(`${colorText(patch.hairColor)}头发`);
@@ -206,7 +233,12 @@ function buildConfirmationReply(patch, isCreate) {
   return isCreate ? `我会绘制${description}，确认开始吗？` : `我会把角色调整为${description}，确认修改吗？`;
 }
 
-function clarify(sessionId, projectId, transcript, question) {
+function clarify(
+  sessionId: string,
+  projectId: string,
+  transcript: string,
+  question: string
+): InterpretResult {
   return {
     interpretationId: makeId("interp"),
     sessionId,
@@ -225,8 +257,8 @@ function clarify(sessionId, projectId, transcript, question) {
   };
 }
 
-function controlReply(type) {
-  const replies = {
+function controlReply(type: string): string {
+  const replies: Record<string, string> = {
     pause: "好的，先暂停在当前进度。",
     resume: "好的，继续绘制。",
     undo: "已准备撤销上一步。",
@@ -244,16 +276,16 @@ function localCostHint() {
   };
 }
 
-function genderText(value) {
+function genderText(value: string): string {
   return value === "male" ? "男生" : value === "neutral" ? "中性角色" : "女生";
 }
 
-function lengthText(value) {
+function lengthText(value: string): string {
   return value === "short" ? "短发" : value === "medium" ? "中长发" : "长发";
 }
 
-function colorText(value) {
-  const names = {
+function colorText(value: string): string {
+  const names: Record<string, string> = {
     blue: "蓝色",
     pink: "粉色",
     purple: "紫色",
@@ -266,20 +298,20 @@ function colorText(value) {
   return names[value] ?? value;
 }
 
-function outfitText(value) {
+function outfitText(value: string): string {
   return value === "hoodie" ? "卫衣" : value === "shirt" ? "衬衫" : "校服";
 }
 
-function accessoryText(value) {
+function accessoryText(value: string): string {
   return value === "glasses" ? "眼镜" : value === "butterfly_knot" ? "蝴蝶结" : "无配饰";
 }
 
-function backgroundText(value) {
-  const names = {
+function backgroundText(value: string): string {
+  const names: Record<string, string> = {
     gradient: "渐变背景",
     watercolor: "水彩风格",
     stars: "星空背景",
     cherry: "樱花背景"
   };
-  return names[value];
+  return names[value] ?? value;
 }

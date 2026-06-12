@@ -12,14 +12,16 @@ npm run dev
 默认地址：
 
 ```text
-http://localhost:8787
+http://localhost:4000
 ```
 
 ## 验证
 
 ```bash
 npm run lint
+npm run typecheck
 npm run build
+npm test
 ```
 
 ## 当前能力
@@ -28,10 +30,16 @@ npm run build
 - `GET /api/v1/config/runtime`
 - `POST /api/v1/sessions`
 - `POST /api/v1/projects`
-- `GET /api/v1/projects/{projectId}`
+- `GET /api/v1/projects/{projectId}`，可选 `?sessionId={sessionId}` 校验归属
 - `PUT /api/v1/projects/{projectId}/snapshot`
 - `POST /api/v1/commands/interpret`
 - `POST /api/v1/commands/{interpretationId}/confirm`
 - `POST /api/v1/commands/{interpretationId}/reject`
 
-当前版本使用内存存储和本地规则解析，不调用真实 ASR、TTS 或 LLM 服务。
+当前版本使用本地 JSON 文件存储和本地规则解析，不调用真实 ASR、TTS 或 LLM 服务。
+
+默认存储目录：
+
+```text
+backend/data
+```
