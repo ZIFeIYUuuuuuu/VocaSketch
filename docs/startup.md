@@ -1,59 +1,69 @@
-# Startup Guide
+# 启动说明
 
-This document records the current startup status and the planned local development workflow.
+本文档记录 VocaSketch 当前可运行部分和后续服务启动计划。
 
-## Current Status
+## 当前状态
 
-PR 1 only initializes documentation and repository structure. The frontend and backend runtimes have not been scaffolded yet.
+前端绘图工作台已经可以本地启动。当前版本使用浏览器 Web Speech API 和本地 mock 指令解析，用于演示语音入口、AI 复述确认、绘图阶段、图层面板和操作历史。
 
-There is no runnable application in this PR.
+后端服务尚未实现。ASR/TTS、LLM 指令解析、工程保存和恢复会在后续 PR 中接入。
 
-## Planned Local Development
-
-After the frontend and backend scaffolds are added, the project will use two local services:
-
-- frontend web drawing workspace
-- backend API service for ASR/TTS calls, command parsing, session state, and project persistence
-
-Expected commands:
+## 前端启动
 
 ```bash
-# Start frontend
 cd frontend
 npm install
 npm run dev
 ```
 
+默认地址：
+
+```text
+http://localhost:3000
+```
+
+## 前端验证
+
 ```bash
-# Start backend
+cd frontend
+npm run lint
+npm run build
+```
+
+当前 PR 已验证：
+
+- TypeScript 类型检查通过
+- Vite 生产构建通过
+
+## 环境变量
+
+前端示例配置见 [../frontend/.env.example](../frontend/.env.example)。
+
+```text
+VITE_API_BASE_URL=http://localhost:8787/api/v1
+VITE_ENABLE_MOCK_COMMANDS=true
+```
+
+根目录 `.env.example` 保留给后续后端服务使用。
+
+请不要提交真实 API Key。
+
+## 后端计划
+
+后端实现后，预计使用：
+
+```bash
 cd backend
 npm install
 npm run dev
 ```
 
-## Environment Variables
+后端将负责：
 
-Copy `.env.example` to `.env` in the service that needs it after runtime code is added.
+- ASR/TTS 调用
+- LLM 指令解析
+- JSON Schema 校验
+- 会话状态管理
+- 绘图工程与操作历史保存
 
-Do not commit real API keys.
-
-Expected variables:
-
-```text
-OPENAI_COMPATIBLE_API_KEY=
-OPENAI_COMPATIBLE_BASE_URL=
-OPENAI_COMPATIBLE_MODEL=
-DASHSCOPE_API_KEY=
-APP_STORAGE_DIR=
-```
-
-## Verification Plan
-
-Once runtime code exists, each implementation PR should include the relevant verification evidence:
-
-- frontend dev server starts successfully
-- backend dev server starts successfully
-- voice command can be transcribed or mocked
-- command parser returns schema-valid operations
-- drawing workspace renders expected layer state
-- README startup commands match the actual project
+具体接口见 [api-contract.md](api-contract.md)。

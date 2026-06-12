@@ -1,0 +1,6 @@
+{
+  "name": "VocaSketch",
+  "description": "Voice-first anime portrait drawing workspace. 基于中文语音指令解析，支持可分层、可编辑、可复原的数位绘画工作台。",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MICROPHONE", "CANVAS_RENDERING"]
+}
