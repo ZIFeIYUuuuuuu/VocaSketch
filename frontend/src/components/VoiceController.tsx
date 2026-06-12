@@ -167,7 +167,7 @@ export const VoiceController: React.FC<VoiceControllerProps> = ({
             </div>
 
             <span className={`text-[10px] font-mono font-bold tracking-wider ${isLightMode ? 'text-slate-600' : 'text-slate-500'} mt-2`}>
-              {isListening ? '🎙️ 麦克风已开 (直接说口令)' : '点击开麦 (口令触发)'}
+              {isListening ? '🎙️ 正在聆听，说完自动识别' : '点击开麦 (自动识别)'}
             </span>
           </div>
 
