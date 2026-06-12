@@ -18,6 +18,11 @@ frontend/.vite/
 logs/
 data/
 backend/data/
+backend_py/data/
+backend_py/.venv/
+backend_py/__pycache__/
+backend_py/src/__pycache__/
+backend_py/src/**/*.pyc
 
 # OS and editor files
 .DS_Store
