@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+.next/
+.nuxt/
+coverage/
+
+# Runtime files
+.env
+.env.*
+!.env.example
+*.log
+logs/
+data/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+
+# Temporary research captures
+qiniu_index*.js
+conversations/
+对话*.md
+
+# Package manager cache
+.pnpm-store/
+.yarn/
