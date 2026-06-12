@@ -45,5 +45,23 @@ export const projectSnapshotSchema = z.object({
   drawProgress: z.number().min(0).max(100),
   currentStage: drawStageSchema,
   canvasObjects: z.array(z.unknown()).default([]),
-  clientRevision: z.number().int().positive()
+  clientRevision: z.number().int().positive(),
+  historyMeta: z
+    .object({
+      kind: z.enum(["snapshot", "command"]).default("snapshot"),
+      transcript: z.string().optional(),
+      aiReplyText: z.string().optional(),
+      operations: z.array(z.unknown()).default([])
+    })
+    .optional()
+});
+
+export const projectHistoryQuerySchema = z.object({
+  sessionId: z.string().trim().min(1).optional(),
+  limit: z.coerce.number().int().positive().max(100).default(50)
+});
+
+export const projectUndoRedoSchema = z.object({
+  sessionId: z.string().trim().min(1),
+  currentRevision: z.number().int().positive()
 });

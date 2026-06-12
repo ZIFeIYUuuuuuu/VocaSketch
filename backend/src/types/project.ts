@@ -37,6 +37,12 @@ export interface ProjectSnapshot {
   currentStage: DrawStage;
   canvasObjects: unknown[];
   clientRevision: number;
+  historyMeta?: {
+    kind?: "snapshot" | "command";
+    transcript?: string;
+    aiReplyText?: string;
+    operations?: unknown[];
+  };
 }
 
 export interface StoredProject {
