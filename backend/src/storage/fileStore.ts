@@ -5,13 +5,14 @@ import { appConfig } from "../config.js";
 import { ApiError } from "../errors.js";
 import { isSafeId } from "./ids.js";
 
-export type StoreCollection = "sessions" | "projects" | "interpretations";
+export type StoreCollection = "sessions" | "projects" | "interpretations" | "history";
 
 export async function ensureStorageReady(): Promise<void> {
   await Promise.all([
     fs.mkdir(collectionDir("sessions"), { recursive: true }),
     fs.mkdir(collectionDir("projects"), { recursive: true }),
-    fs.mkdir(collectionDir("interpretations"), { recursive: true })
+    fs.mkdir(collectionDir("interpretations"), { recursive: true }),
+    fs.mkdir(collectionDir("history"), { recursive: true })
   ]);
 }
 

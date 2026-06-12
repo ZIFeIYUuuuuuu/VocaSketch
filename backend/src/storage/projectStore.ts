@@ -55,6 +55,10 @@ export async function getProject(projectId: string): Promise<StoredProject | nul
   return readJson<StoredProject>("projects", projectId);
 }
 
+export async function saveProject(project: StoredProject): Promise<StoredProject> {
+  return writeJson("projects", project.projectId, project);
+}
+
 export async function saveSnapshot(
   project: StoredProject,
   snapshot: ProjectSnapshot
@@ -73,5 +77,5 @@ export async function saveSnapshot(
     updatedAt: new Date().toISOString()
   };
 
-  return writeJson("projects", updated.projectId, updated);
+  return saveProject(updated);
 }

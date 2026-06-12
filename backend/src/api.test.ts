@@ -70,6 +70,16 @@ try {
   assert.equal(readWithSession.status, 200);
   assert.equal(readWithSession.body.sessionId, session.body.sessionId);
 
+  const emptyUndo = await request(baseUrl, `/projects/${project.body.projectId}/undo`, {
+    method: "POST",
+    body: {
+      sessionId: session.body.sessionId,
+      currentRevision: project.body.serverRevision
+    }
+  });
+  assert.equal(emptyUndo.status, 409);
+  assert.equal(emptyUndo.body.error.code, "NO_UNDO_AVAILABLE");
+
   const missingProject = await request(
     baseUrl,
     `/projects/proj_missing?sessionId=${session.body.sessionId}`
@@ -88,12 +98,87 @@ try {
       drawProgress: 100,
       currentStage: "已完成",
       canvasObjects: [{ type: "test-object" }],
-      clientRevision: project.body.serverRevision
+      clientRevision: project.body.serverRevision,
+      historyMeta: {
+        kind: "command",
+        transcript: "把眼睛改成绿色",
+        aiReplyText: "我会把眼睛改成绿色，确认吗？",
+        operations: [
+          {
+            type: "redraw_component",
+            target: "eyes",
+            patch: {
+              eyeColor: "green"
+            }
+          }
+        ]
+      }
     }
   });
 
   assert.equal(snapshot.status, 200);
   assert.equal(snapshot.body.serverRevision, 2);
+  assert.equal(snapshot.body.historyCount, 1);
+  assert.equal(snapshot.body.redoCount, 0);
+
+  const historyList = await request(
+    baseUrl,
+    `/projects/${project.body.projectId}/history?sessionId=${session.body.sessionId}&limit=10`
+  );
+  assert.equal(historyList.status, 200);
+  assert.equal(historyList.body.undoCount, 1);
+  assert.equal(historyList.body.redoCount, 0);
+  assert.equal(historyList.body.items.length, 1);
+  assert.equal(historyList.body.items[0].kind, "command");
+  assert.equal(historyList.body.items[0].transcript, "把眼睛改成绿色");
+  assert.equal(historyList.body.items[0].operations[0].target, "eyes");
+
+  const undo = await request(baseUrl, `/projects/${project.body.projectId}/undo`, {
+    method: "POST",
+    body: {
+      sessionId: session.body.sessionId,
+      currentRevision: snapshot.body.serverRevision
+    }
+  });
+  assert.equal(undo.status, 200);
+  assert.equal(undo.body.serverRevision, 3);
+  assert.equal(undo.body.config.hairColor, "purple");
+  assert.equal(undo.body.config.eyeColor, "blue");
+  assert.equal(undo.body.historyCount, 0);
+  assert.equal(undo.body.redoCount, 1);
+
+  const noUndoLeft = await request(baseUrl, `/projects/${project.body.projectId}/undo`, {
+    method: "POST",
+    body: {
+      sessionId: session.body.sessionId,
+      currentRevision: undo.body.serverRevision
+    }
+  });
+  assert.equal(noUndoLeft.status, 409);
+  assert.equal(noUndoLeft.body.error.code, "NO_UNDO_AVAILABLE");
+
+  const redo = await request(baseUrl, `/projects/${project.body.projectId}/redo`, {
+    method: "POST",
+    body: {
+      sessionId: session.body.sessionId,
+      currentRevision: undo.body.serverRevision
+    }
+  });
+  assert.equal(redo.status, 200);
+  assert.equal(redo.body.serverRevision, 4);
+  assert.equal(redo.body.config.eyeColor, "green");
+  assert.equal(redo.body.historyCount, 1);
+  assert.equal(redo.body.redoCount, 0);
+
+  const noRedoLeft = await request(baseUrl, `/projects/${project.body.projectId}/redo`, {
+    method: "POST",
+    body: {
+      sessionId: session.body.sessionId,
+      currentRevision: redo.body.serverRevision
+    }
+  });
+  assert.equal(noRedoLeft.status, 409);
+  assert.equal(noRedoLeft.body.error.code, "NO_REDO_AVAILABLE");
 
   const revisionConflict = await request(baseUrl, `/projects/${project.body.projectId}/snapshot`, {
     method: "PUT",
@@ -110,7 +195,7 @@ try {
 
   assert.equal(revisionConflict.status, 409);
   assert.equal(revisionConflict.body.error.code, "REVISION_CONFLICT");
-  assert.equal(revisionConflict.body.error.details.serverRevision, 2);
+  assert.equal(revisionConflict.body.error.details.serverRevision, 4);
 
   const interpretation = await request(baseUrl, "/commands/interpret", {
     method: "POST",
@@ -154,7 +239,7 @@ try {
         projectId: project.body.projectId,
         confirmed: true,
         confirmationText: "确认",
-        currentRevision: snapshot.body.serverRevision
+        currentRevision: redo.body.serverRevision
       }
     }
   );
