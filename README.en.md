@@ -61,7 +61,7 @@ The project does not use end-to-end image generation as the main drawing path. T
 
 ```text
 .
-├── backend/                     # Backend service, APIs, parser adapter, persistence
+├── backend/                  # Python v2 backend: drawing jobs, assets, providers, SSE
 ├── docs/                        # PRD, design notes, architecture, startup docs
 ├── frontend/                    # Web drawing workspace
 ├── .github/                     # Pull request template
@@ -75,7 +75,7 @@ The project does not use end-to-end image generation as the main drawing path. T
 
 ## Current Implementation Status
 
-The repository now includes a runnable frontend drawing workspace prototype and a minimal backend API service. The frontend demonstrates the voice entry point, confirmation flow, drawing stages, layer panel, and local mock command parsing. The backend provides session, project, and text command interpretation APIs as the first step toward replacing the frontend mock.
+The repository now uses the Python-first v2 backend as the normal runtime path. The frontend demonstrates the voice entry point, Python drawing jobs, process playback, layer panel, and a local canvas helper view. The backend provides v2 drawing jobs, asset content, runtime readiness, recent jobs, SSE events, and optional real provider boundaries.
 
 Included:
 
@@ -88,15 +88,16 @@ Included:
 - competition requirement checklist
 - PRD document
 - Vite + React frontend workspace prototype
-- minimal Node.js backend API service
-- local rule-based command interpretation
+- Python FastAPI v2 backend
+- Drawing Job / SSE / local asset content layer
+- optional real text and image provider boundaries
+- process playback manifests and derived frames
 - repository collaboration and Git operation rules
 
 Not included yet:
 
-- ASR/TTS integration
-- LLM parser integration
-- file-based project persistence implementation
+- production account system
+- production live layer decomposition provider
 
 ## Startup Guide
 
@@ -114,32 +115,32 @@ Default URL:
 http://localhost:3000
 ```
 
-The backend API service can run locally:
+The Python v2 backend can run locally:
 
 ```bash
 cd backend
-npm install
-npm run dev
+python -m uvicorn vocasketch_backend.main:app --app-dir src --host 127.0.0.1 --port 8000
 ```
 
 Default backend URL:
 
 ```text
-http://localhost:8787
+http://localhost:8000
 ```
 
-Health check:
+Runtime readiness:
 
 ```text
-http://localhost:8787/api/v1/health
+http://localhost:8000/api/v2/runtime/readiness
 ```
 
 ## Documentation
 
+- [Project Structure](docs/project-structure.md)
 - [PRD](docs/PRD-ai-voice-drawing.md)
 - [Design Document](docs/design.md)
 - [Architecture Notes](docs/architecture.md)
-- [API Contract](docs/api-contract.md)
+- [Archived API Contract](docs/archive/api-v1-contract.md)
 - [Startup Guide](docs/startup.md)
 - [Competition Requirements](competition-requirements.md)
 

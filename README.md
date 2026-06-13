@@ -67,7 +67,7 @@ MVP 聚焦一个可控主题：
 
 ```text
 .
-├── backend/                     # 后端服务、API、解析适配器、工程保存
+├── backend/                  # Python v2 后端：drawing jobs、资产、provider、SSE
 ├── docs/                        # PRD、设计文档、架构说明、启动说明
 ├── frontend/                    # 前端绘图工作台
 ├── .github/                     # PR 模板
@@ -81,7 +81,7 @@ MVP 聚焦一个可控主题：
 
 ## 当前实现状态
 
-当前仓库已经包含前端绘图工作台原型和后端最小 API 服务。前端可以本地启动，用于演示语音入口、确认流、绘图阶段、图层面板和本地 mock 指令解析。后端提供会话、工程、本地 JSON 快照存储和文本指令解析接口，为后续前端接入真实 API 打基础。
+当前仓库已经切换为 Python-first v2 后端。前端可以本地启动，用于演示语音入口、Python drawing job、绘画过程播放、图层面板和本地 Canvas 辅助视图。后端提供 v2 drawing jobs、资产内容、runtime readiness、recent jobs、SSE 事件流和可选真实 provider 边界。
 
 已包含：
 
@@ -96,16 +96,16 @@ MVP 聚焦一个可控主题：
 - 比赛规范 checklist
 - PRD 文档
 - 前端 Vite + React 工作台原型
-- 后端 Node.js 最小 API 服务
-- 本地规则版语音指令解析
+- Python FastAPI v2 后端
+- Drawing Job / SSE / 本地资产文件层
+- 可选真实文本与生图 provider 边界
+- 绘画过程播放 manifest 与派生帧
 - 仓库协作与 Git 操作规则
 
 暂未包含：
 
-- ASR/TTS 接入
-- LLM 指令解析接入
-- ASR/TTS 接入
-- LLM 指令解析接入
+- 生产级账号体系
+- 真实图层分解 provider 的生产接入
 
 ## 启动说明
 
@@ -123,34 +123,34 @@ npm run dev
 http://localhost:3000
 ```
 
-后端 API 服务当前可以本地启动：
+Python v2 后端当前可以本地启动：
 
 ```bash
 cd backend
-npm install
-npm run dev
+python -m uvicorn vocasketch_backend.main:app --app-dir src --host 127.0.0.1 --port 8000
 ```
 
 默认开发地址：
 
 ```text
-http://localhost:4000
+http://localhost:8000
 ```
 
-健康检查：
+runtime readiness：
 
 ```text
-http://localhost:4000/api/v1/health
+http://localhost:8000/api/v2/runtime/readiness
 ```
 
 更多说明见 [docs/startup.md](docs/startup.md)。
 
 ## 文档入口
 
+- [项目结构](docs/project-structure.md)
 - [PRD](docs/PRD-ai-voice-drawing.md)
 - [设计文档](docs/design.md)
 - [架构说明](docs/architecture.md)
-- [API 合约](docs/api-contract.md)
+- [历史 API 合约归档](docs/archive/api-v1-contract.md)
 - [启动说明](docs/startup.md)
 - [比赛工程规范](competition-requirements.md)
 - [English README](README.en.md)

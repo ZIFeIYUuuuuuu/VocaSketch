@@ -1,12 +1,12 @@
-# 启动说明
+﻿# 启动说明
 
 本文档记录 VocaSketch 当前可运行部分和本地验证方式。
 
 ## 当前状态
 
-前端绘图工作台已经可以本地启动。当前版本使用浏览器 Web Speech API 和本地 mock 指令解析，用于演示语音入口、AI 复述确认、绘图阶段、图层面板和操作历史。
+VocaSketch 的正常运行路径已经全面转向 Python `backend` v2 后端。前端使用浏览器 Web Speech API 获取文本，并把绘画描述直接提交给 v2 Drawing Job；后端负责真实/模拟 provider、资产文件、SSE 事件、最近任务、runtime readiness 和绘画过程播放 manifest。
 
-后端服务已经提供最小可运行 API，包括健康检查、运行时配置、会话创建、工程创建、工程快照保存、本地 JSON 文件持久化、文本指令解析和 DashScope/千问 ASR/TTS 语音接口。文本指令解析会优先使用 OpenAI-compatible/sub2api Parser Adapter，未配置或调用失败时自动回退到本地规则解析。语音能力未配置或调用失败时，前端会回退到 Web Speech API 或字幕模式。
+旧 Node/V1 后端已经从默认流程移除。前端默认不会请求 `/api/v1`；当前只需要启动 `backend/` 这一套 Python 后端。
 
 ## 前端启动
 
@@ -27,106 +27,92 @@ http://localhost:3000
 ```bash
 cd frontend
 npm run lint
-npm run build
 ```
 
-当前 PR 已验证：
+如需验证生产构建，可运行 `npm run build`；该命令会写入 `frontend/dist/`。
 
-- TypeScript 类型检查通过
-- Vite 生产构建通过
-
-## 后端启动
+## Python v2 后端启动
 
 ```bash
 cd backend
-npm install
-npm run dev
+python -m uvicorn vocasketch_backend.main:app --app-dir src --host 127.0.0.1 --port 8000
 ```
 
 默认地址：
 
 ```text
-http://localhost:4000
+http://localhost:8000
 ```
 
-健康检查：
+runtime readiness：
 
 ```text
-http://localhost:4000/api/v1/health
+http://localhost:8000/api/v2/runtime/readiness
 ```
 
-## 后端验证
+## Python v2 后端验证
 
 ```bash
-cd backend
-npm run typecheck
-npm run build
-npm test
+python -B -m unittest discover -s backend/tests -v
+python -B -m compileall backend/src backend/tests
 ```
 
 ## 后端本地存储
 
-后端使用 `APP_STORAGE_DIR` 指定本地 JSON 存储目录，默认是从 `backend/` 启动时的 `./data`，即 `backend/data/`。
+Python v2 后端使用 `VOCASKETCH_BACKEND_DATA_DIR` 指定本地 JSON 与资产存储目录，默认是 `backend/data/`。
 
 目录结构：
 
 ```text
 backend/data/
-├── sessions/
-│   └── sess_xxx.json
-├── projects/
-│   └── proj_xxx.json
-├── interpretations/
-│   └── interp_xxx.json
-├── history/
-│   └── proj_xxx.json
-└── parser-costs/
-    └── YYYY-MM-DD.jsonl
-└── audio/
-    ├── tmp/
-    └── tts/
+├── jobs/
+├── events/
+└── assets/
+    ├── content/
+    └── metadata/
 ```
 
-`backend/data/` 已被 `.gitignore` 忽略，请不要提交本地运行数据。`parser-costs/` 只记录 provider、model、延迟、fallback reason、token usage 等调用摘要，不记录 API key。
+`backend/data/` 已被 `.gitignore` 忽略，请不要提交本地运行数据。runtime readiness、job metadata、event payload 和 asset metadata 都不应记录 API key。
 
 ## 环境变量
 
 前端示例配置见 [../frontend/.env.example](../frontend/.env.example)。
 
 ```text
-VITE_API_BASE_URL=http://localhost:4000/api/v1
-VITE_ENABLE_MOCK_COMMANDS=true
+VITE_API_V2_BASE_URL=http://localhost:8000/api/v2
+VITE_ENABLE_V2_VOICE_DRAWING=true
 ```
 
-后端示例配置见 [../backend/.env.example](../backend/.env.example)，根目录 `.env.example` 也包含同名变量。
+Python v2 后端常用配置：
 
 ```text
-OPENAI_COMPATIBLE_API_KEY=
-OPENAI_COMPATIBLE_BASE_URL=https://your-sub2api-host/v1
-OPENAI_COMPATIBLE_MODEL=your-model
-OPENAI_COMPATIBLE_TIMEOUT_MS=8000
-PARSER_PROVIDER=auto
-PARSER_COST_LOG=false
-DASHSCOPE_API_KEY=
-DASHSCOPE_ASR_MODEL=paraformer-realtime-8k-v2
-# Legacy REST Qwen-ASR model, kept only for rollback/reference:
-# DASHSCOPE_ASR_MODEL=qwen3-asr-flash
-DASHSCOPE_TTS_MODEL=qwen3-tts-flash
-VOICE_ASR_TIMEOUT_MS=15000
-VOICE_TTS_TIMEOUT_MS=15000
-VOICE_MAX_AUDIO_MB=10
-VOICE_MAX_TTS_CHARS=300
+VOCASKETCH_BACKEND_DATA_DIR=backend/data
+VOCASKETCH_BACKEND_HOST=127.0.0.1
+VOCASKETCH_BACKEND_PORT=8000
+VOCASKETCH_PROVIDER_PROFILE=mock
+VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS=0
+VOCASKETCH_OPENAI_API_BASE_URL=
+VOCASKETCH_OPENAI_API_KEY=
+VOCASKETCH_OPENAI_RESPONSE_MODEL=
+VOCASKETCH_OPENAI_IMAGE_API_BASE_URL=
+VOCASKETCH_OPENAI_IMAGE_API_KEY=
+VOCASKETCH_OPENAI_IMAGE_MODEL=
 ```
 
-`OPENAI_COMPATIBLE_BASE_URL` 可以填 `https://host/v1`，也可以直接填 `https://host/v1/chat/completions`。`PARSER_PROVIDER=local` 会强制使用本地规则解析；`auto` 在配置完整时远端优先；`openai-compatible` 会优先远端，但失败时仍回退本地规则解析，保证演示不中断。
+默认 `mock` 不联网。只有显式设置 `VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS=1` 且 provider 配置齐全时，才会调用真实模型。
+
+兼容说明：
+
+- 新的标准命名是 `VOCASKETCH_BACKEND_DATA_DIR`、`VOCASKETCH_BACKEND_HOST`、`VOCASKETCH_BACKEND_PORT`
+- 旧的 `VOCASKETCH_BACKEND_PY_*` 仍可读取，便于本地迁移
+- 更早期文档里出现过的 `VOCASKETCH_DATA_DIR` 也仍兼容，但不再推荐继续使用
 
 请不要提交真实 API Key。
 
-## 后端后续计划
+## 历史说明
 
-后续后端将继续补齐：
+旧 `/api/v1` 合约仅作为历史归档保留，详见 [archive/api-v1-contract.md](archive/api-v1-contract.md)。正常开发不要再按该合约启动服务。后续工作继续围绕 Python v2：
 
-- 流式 ASR/TTS 体验
-- 绘图工程与操作历史恢复
-
-具体接口见 [api-contract.md](api-contract.md)。
+- 优化真实生图后的确定性绘画过程播放
+- 将更多工程状态能力迁移到 v2
+- 接入生产级真实图层分解 provider

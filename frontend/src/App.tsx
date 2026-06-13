@@ -7,7 +7,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   Sparkles,
   Volume2,
-  Info,
   Mic,
   Maximize2,
   Minimize2,
@@ -20,33 +19,65 @@ import {
   Moon
 } from 'lucide-react';
 import { CanvasRenderer } from './components/CanvasRenderer';
-import { LayerPanel } from './components/LayerPanel';
 import { StatusIndicator } from './components/StatusIndicator';
 import { VoiceController } from './components/VoiceController';
-import { DemoScriptPanel } from './components/DemoScriptPanel';
+import { ProcessPlaybackPlayer } from './components/ProcessPlaybackPlayer';
+import {
+  computePlaybackElapsed,
+  computeStepOpacity,
+  pausePlaybackAt,
+  restartPlaybackAt,
+  resumePlaybackAt,
+} from './utils/playback.js';
 import { CharacterConfig, DrawStage, PaintLayer, SystemState, VoiceLog } from './types';
 import {
+  buildAssetContentUrl,
+  cancelDrawingJob,
   confirmCommand,
+  confirmDrawingJob,
+  createDrawingJob,
   createProject,
   createSession,
+  getAssetMetadata,
+  getDrawingJob,
   getProject,
   getProjectHistory,
+  getRuntimeReadiness,
+  getV2ApiBaseUrl,
   interpretCommand,
+  listDrawingJobs,
   redoProject,
+  retryDrawingJob,
   saveProjectSnapshot,
+  subscribeDrawingJobEvents,
   synthesizeSpeech,
   transcribeAudio,
   undoProject
 } from './api/client';
-import type { CommandInterpretation, DrawingOperation, ProjectHistoryEntry } from './api/types';
+import type {
+  AssetRecord,
+  CommandInterpretation,
+  DrawingJob,
+  DrawingJobSummary,
+  DrawingOperation,
+  JobEvent,
+  JobStatus,
+  LayerAsset,
+  PlaybackManifestStep,
+  ProjectHistoryEntry,
+  RuntimeReadiness
+} from './api/types';
 
 // Web Speech SpeechRecognition typed definition helper
 const SpeechRecognitionAPI =
   (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4000/api/v1';
+const legacyApiBaseUrl = import.meta.env.VITE_LEGACY_API_BASE_URL ?? import.meta.env.VITE_API_BASE_URL;
+const drawingApiBaseUrl = getV2ApiBaseUrl();
 const SESSION_STORAGE_KEY = 'vocasketch.sessionId';
 const PROJECT_STORAGE_KEY = 'vocasketch.projectId';
+const V2_JOB_STORAGE_KEY = 'vocasketch.v2JobId';
+const V2_EVENT_SEQ_STORAGE_KEY = 'vocasketch.v2LastEventSeq';
 const AUTO_RECORD_MAX_MS = 6500;
 const AUTO_RECORD_MIN_MS = 900;
 const SILENCE_AFTER_SPEECH_MS = 950;
@@ -58,6 +89,9 @@ const STAGE_BOUNDARIES = {
   watercolorDone: 90
 } as const;
 type RedrawTarget = 'hair' | 'eyes' | 'expression' | 'outfit' | 'accessory' | 'background';
+const V2_TERMINAL_STATUSES: JobStatus[] = ['completed', 'failed', 'cancelled'];
+const ENABLE_V2_VOICE_DRAWING = import.meta.env.VITE_ENABLE_V2_VOICE_DRAWING !== 'false';
+const ENABLE_LEGACY_V1_BACKEND = import.meta.env.VITE_ENABLE_LEGACY_V1_BACKEND === 'true';
 
 export default function App() {
   // -------------------------------------------------------------------------
@@ -101,6 +135,28 @@ export default function App() {
   const [serverRevision, setServerRevision] = useState<number | null>(null);
   const [historyCount, setHistoryCount] = useState<number>(0);
   const [redoCount, setRedoCount] = useState<number>(0);
+  const [v2PromptText, setV2PromptText] = useState<string>('');
+  const [v2Job, setV2Job] = useState<DrawingJob | null>(null);
+  const [v2FinalAsset, setV2FinalAsset] = useState<AssetRecord | null>(null);
+  const [v2PlaybackManifestAsset, setV2PlaybackManifestAsset] = useState<AssetRecord | null>(null);
+  const [v2LastEventType, setV2LastEventType] = useState<JobEvent['type'] | null>(null);
+  const [v2EventLog, setV2EventLog] = useState<JobEvent[]>([]);
+  const [v2FlowMessage, setV2FlowMessage] = useState<string>('等待创建 v2 drawing job');
+  const [v2UiError, setV2UiError] = useState<string | null>(null);
+  const [v2UiErrorDiagnostic, setV2UiErrorDiagnostic] = useState<string | null>(null);
+  const [v2RecentJobs, setV2RecentJobs] = useState<DrawingJobSummary[]>([]);
+  const [v2RecentJobsError, setV2RecentJobsError] = useState<string | null>(null);
+  const [isV2RecentJobsLoading, setIsV2RecentJobsLoading] = useState<boolean>(false);
+  const [v2RuntimeReadiness, setV2RuntimeReadiness] = useState<RuntimeReadiness | null>(null);
+  const [v2RuntimeError, setV2RuntimeError] = useState<string | null>(null);
+  const [isV2RuntimeLoading, setIsV2RuntimeLoading] = useState<boolean>(false);
+  const [isV2Submitting, setIsV2Submitting] = useState<boolean>(false);
+  const [isV2Retrying, setIsV2Retrying] = useState<boolean>(false);
+  const [isV2Cancelling, setIsV2Cancelling] = useState<boolean>(false);
+  const isV2ActionBusy = isV2Submitting || isV2Retrying || isV2Cancelling;
+  const [isV2PlaybackRunning, setIsV2PlaybackRunning] = useState<boolean>(false);
+  const [v2PlaybackElapsedMs, setV2PlaybackElapsedMs] = useState<number>(0);
+  const [v2PlaybackSessionNonce, setV2PlaybackSessionNonce] = useState<number>(0);
 
   // State Machine control vectors
   const [drawProgress, setDrawProgress] = useState<number>(0);
@@ -142,6 +198,15 @@ export default function App() {
   const paintTimerRef = useRef<NodeJS.Timeout | null>(null);
   const redrawPulseTimerRef = useRef<NodeJS.Timeout | null>(null);
   const bootstrapStartedRef = useRef<boolean>(false);
+  const v2SubscriptionRef = useRef<{ close: () => void } | null>(null);
+  const v2PollTimerRef = useRef<number | null>(null);
+  const v2ActiveJobIdRef = useRef<string | null>(null);
+  const v2LastEventSeqRef = useRef<number>(0);
+  const v2RestoreStartedRef = useRef<boolean>(false);
+  const v2AutoAdvanceJobIdRef = useRef<string | null>(null);
+  const v2PlaybackRafRef = useRef<number | null>(null);
+  const v2PlaybackStartedAtRef = useRef<number | null>(null);
+  const v2PlaybackBaseElapsedRef = useRef<number>(0);
 
   // UI layout extra toggles
   const [isFullScreen, setIsFullScreen] = useState<boolean>(false);
@@ -159,6 +224,314 @@ export default function App() {
       text,
     };
     setVoiceLogs((prev) => [newLog, ...prev]);
+  };
+
+  const stopV2Polling = () => {
+    if (v2PollTimerRef.current !== null) {
+      window.clearInterval(v2PollTimerRef.current);
+      v2PollTimerRef.current = null;
+    }
+  };
+
+  const stopV2Subscription = () => {
+    v2SubscriptionRef.current?.close();
+    v2SubscriptionRef.current = null;
+  };
+
+  const stopV2PlaybackLoop = () => {
+    if (v2PlaybackRafRef.current !== null) {
+      window.cancelAnimationFrame(v2PlaybackRafRef.current);
+      v2PlaybackRafRef.current = null;
+    }
+  };
+
+  const pauseV2Playback = () => {
+    const snapshot = pausePlaybackAt(v2PlaybackElapsedMs);
+    stopV2PlaybackLoop();
+    v2PlaybackBaseElapsedRef.current = snapshot.baseElapsedMs;
+    v2PlaybackStartedAtRef.current = snapshot.startedAtMs;
+    setIsV2PlaybackRunning(false);
+  };
+
+  const resumeV2Playback = () => {
+    const snapshot = resumePlaybackAt(v2PlaybackElapsedMs, performance.now());
+    v2PlaybackBaseElapsedRef.current = snapshot.baseElapsedMs;
+    v2PlaybackStartedAtRef.current = snapshot.startedAtMs;
+    setIsV2PlaybackRunning(true);
+  };
+
+  const restartV2Playback = () => {
+    const snapshot = restartPlaybackAt(performance.now());
+    stopV2PlaybackLoop();
+    v2PlaybackBaseElapsedRef.current = snapshot.baseElapsedMs;
+    v2PlaybackStartedAtRef.current = snapshot.startedAtMs;
+    setV2PlaybackElapsedMs(0);
+    setIsV2PlaybackRunning(true);
+    setV2PlaybackSessionNonce((value) => value + 1);
+  };
+
+  const resetV2Playback = () => {
+    stopV2PlaybackLoop();
+    v2PlaybackStartedAtRef.current = null;
+    v2PlaybackBaseElapsedRef.current = 0;
+    setIsV2PlaybackRunning(false);
+    setV2PlaybackElapsedMs(0);
+  };
+
+  const resetV2Tracking = () => {
+    stopV2Subscription();
+    stopV2Polling();
+    stopV2PlaybackLoop();
+    v2ActiveJobIdRef.current = null;
+    v2LastEventSeqRef.current = 0;
+  };
+
+  const isTerminalV2Status = (status?: JobStatus | null) => !!status && V2_TERMINAL_STATUSES.includes(status);
+  const shouldAutoAdvanceV2Frames = (job: DrawingJob) =>
+    job.status === 'preview_ready' && !job.finalAssetId && !job.playbackManifestAssetId;
+
+  const clearV2UiError = () => {
+    setV2UiError(null);
+    setV2UiErrorDiagnostic(null);
+  };
+
+  const setV2ErrorFromUnknown = (error: unknown, fallbackMessage: string) => {
+    const apiError = error as Error & {
+      status?: number;
+      code?: string;
+      retryable?: boolean;
+    };
+    setV2UiError(error instanceof Error ? error.message : fallbackMessage);
+
+    const fragments: string[] = [];
+    if (apiError.status) {
+      fragments.push(`status ${apiError.status}`);
+    }
+    if (apiError.code) {
+      fragments.push(apiError.code);
+    }
+    if (typeof apiError.retryable === 'boolean') {
+      fragments.push(`retryable ${apiError.retryable ? 'yes' : 'no'}`);
+    }
+    setV2UiErrorDiagnostic(fragments.length > 0 ? fragments.join(' · ') : null);
+  };
+
+  const persistV2CurrentJob = (jobId: string) => {
+    localStorage.setItem(V2_JOB_STORAGE_KEY, jobId);
+  };
+
+  const clearPersistedV2EventSeq = () => {
+    localStorage.removeItem(V2_EVENT_SEQ_STORAGE_KEY);
+    v2LastEventSeqRef.current = 0;
+  };
+
+  const clearPersistedV2Job = () => {
+    localStorage.removeItem(V2_JOB_STORAGE_KEY);
+    clearPersistedV2EventSeq();
+  };
+
+  const readPersistedV2JobId = () => {
+    return localStorage.getItem(V2_JOB_STORAGE_KEY)?.trim() || null;
+  };
+
+  const readPersistedV2EventSeq = () => {
+    const rawValue = localStorage.getItem(V2_EVENT_SEQ_STORAGE_KEY);
+    if (!rawValue) {
+      return 0;
+    }
+    const parsed = Number.parseInt(rawValue, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  };
+
+  const persistV2EventSeq = (seq: number) => {
+    if (!Number.isFinite(seq) || seq <= v2LastEventSeqRef.current) {
+      return;
+    }
+    v2LastEventSeqRef.current = seq;
+    localStorage.setItem(V2_EVENT_SEQ_STORAGE_KEY, String(seq));
+  };
+
+  const refreshV2RecentJobs = async (options: { silent?: boolean } = {}) => {
+    if (!options.silent) {
+      setIsV2RecentJobsLoading(true);
+    }
+
+    try {
+      const response = await listDrawingJobs({ limit: 6 });
+      setV2RecentJobs(response.items);
+      setV2RecentJobsError(null);
+    } catch (error) {
+      console.warn('Loading recent v2 drawing jobs failed.', error);
+      setV2RecentJobsError(error instanceof Error ? error.message : '无法加载最近任务。');
+    } finally {
+      if (!options.silent) {
+        setIsV2RecentJobsLoading(false);
+      }
+    }
+  };
+
+  const refreshV2RuntimeReadiness = async () => {
+    setIsV2RuntimeLoading(true);
+    try {
+      const readiness = await getRuntimeReadiness();
+      setV2RuntimeReadiness(readiness);
+      setV2RuntimeError(null);
+    } catch (error) {
+      console.warn('Loading v2 runtime readiness failed.', error);
+      setV2RuntimeError(error instanceof Error ? error.message : '无法读取 v2 runtime readiness。');
+    } finally {
+      setIsV2RuntimeLoading(false);
+    }
+  };
+
+  const loadV2AssetSet = async (job: DrawingJob) => {
+    const [finalAsset, manifestAsset] = await Promise.all([
+      job.finalAssetId ? getAssetMetadata(job.finalAssetId).catch(() => null) : Promise.resolve(null),
+      job.playbackManifestAssetId ? getAssetMetadata(job.playbackManifestAssetId).catch(() => null) : Promise.resolve(null)
+    ]);
+
+    setV2FinalAsset(finalAsset);
+    setV2PlaybackManifestAsset(manifestAsset);
+  };
+
+  const describeV2Status = (job: DrawingJob) => {
+    if (job.status === 'preview_ready' && job.requiresConfirmation) {
+      return '内部构图已完成，正在自动进入绘画过程帧生成。';
+    }
+    if (job.status === 'preview_ready') {
+      return '内部构图已完成，正在生成绘画过程帧。';
+    }
+    if (job.status === 'final_generating') {
+      return '正在生成最终图，完成后会直接展示绘画过程帧。';
+    }
+    if (job.status === 'layers_generating' || job.status === 'layers_ready' || job.status === 'playback_ready') {
+      return '正在整理 10% 到 100% 的绘画过程帧。';
+    }
+    if (job.status === 'completed') {
+      return '绘画过程帧已完成，可以查看和回放。';
+    }
+    if (job.status === 'failed') {
+      return job.error?.message ?? 'drawing job 失败';
+    }
+    if (job.status === 'cancelled') {
+      return 'drawing job 已取消。';
+    }
+    return `当前状态：${job.status}（${job.progressPercent}%）`;
+  };
+
+  const autoAdvanceV2Frames = async (job: DrawingJob) => {
+    if (!shouldAutoAdvanceV2Frames(job) || v2AutoAdvanceJobIdRef.current === job.jobId) {
+      return;
+    }
+
+    v2AutoAdvanceJobIdRef.current = job.jobId;
+    setV2FlowMessage('内部构图完成，正在自动进入 10% 到 100% 帧生成。');
+
+    try {
+      const advanced = await confirmDrawingJob(job.jobId, {
+        selectedPreviewAssetId: job.previewAssetId ?? undefined,
+        notes: 'frontend-auto-advance-to-frame-generation'
+      });
+
+      if (v2ActiveJobIdRef.current !== job.jobId) {
+        return;
+      }
+
+      setV2Job(advanced);
+      await loadV2AssetSet(advanced);
+      setV2FlowMessage(describeV2Status(advanced));
+      void refreshV2RecentJobs({ silent: true });
+    } catch (error) {
+      console.error('Auto advancing v2 drawing job to frame generation failed.', error);
+      setV2ErrorFromUnknown(error, '自动进入绘画过程帧生成失败。');
+    } finally {
+      if (v2AutoAdvanceJobIdRef.current === job.jobId) {
+        v2AutoAdvanceJobIdRef.current = null;
+      }
+    }
+  };
+
+  const refreshV2JobSnapshot = async (jobId: string) => {
+    const job = await getDrawingJob(jobId);
+    if (v2ActiveJobIdRef.current !== jobId) {
+      return job;
+    }
+
+    setV2Job(job);
+    persistV2CurrentJob(job.jobId);
+    clearV2UiError();
+    setV2FlowMessage(describeV2Status(job));
+    await loadV2AssetSet(job);
+
+    if (shouldAutoAdvanceV2Frames(job)) {
+      void autoAdvanceV2Frames(job);
+    }
+
+    if (isTerminalV2Status(job.status)) {
+      stopV2Polling();
+      void refreshV2RecentJobs({ silent: true });
+    }
+
+    return job;
+  };
+
+  const startV2Polling = (jobId: string) => {
+    if (v2PollTimerRef.current !== null) {
+      return;
+    }
+
+    v2PollTimerRef.current = window.setInterval(() => {
+      void refreshV2JobSnapshot(jobId).catch((error) => {
+        console.warn('Polling v2 drawing job failed.', error);
+      });
+    }, 1500);
+  };
+
+  const trackV2Job = (jobId: string, options: { afterSeq?: number } = {}) => {
+    const resumeAfterSeq = Math.max(0, Math.floor(options.afterSeq ?? v2LastEventSeqRef.current));
+    resetV2Tracking();
+    v2ActiveJobIdRef.current = jobId;
+    v2LastEventSeqRef.current = resumeAfterSeq;
+    persistV2CurrentJob(jobId);
+    if (resumeAfterSeq > 0) {
+      localStorage.setItem(V2_EVENT_SEQ_STORAGE_KEY, String(resumeAfterSeq));
+    } else {
+      localStorage.removeItem(V2_EVENT_SEQ_STORAGE_KEY);
+    }
+
+    const subscription = subscribeDrawingJobEvents(jobId, {
+      afterSeq: resumeAfterSeq,
+      onOpen: () => {
+        if (v2ActiveJobIdRef.current === jobId) {
+          setV2FlowMessage('已连接 drawing job 事件流。');
+        }
+      },
+      onEvent: (event) => {
+        if (v2ActiveJobIdRef.current !== jobId) {
+          return;
+        }
+        persistV2EventSeq(event.seq);
+        setV2LastEventType(event.type);
+        setV2EventLog((prev) => [event, ...prev].slice(0, 14));
+        void refreshV2JobSnapshot(jobId).catch((error) => {
+          console.warn('Refreshing v2 drawing job after event failed.', error);
+        });
+      },
+      onError: (error) => {
+        if (v2ActiveJobIdRef.current !== jobId) {
+          return;
+        }
+        console.warn('Drawing job SSE failed, switching to polling.', error);
+        setV2FlowMessage('事件流中断，已切换到轮询刷新。');
+        startV2Polling(jobId);
+      }
+    });
+
+    v2SubscriptionRef.current = subscription;
+    if (!subscription.usingEventSource) {
+      setV2FlowMessage('当前环境不支持 SSE，已启用轮询刷新。');
+      startV2Polling(jobId);
+    }
   };
 
   const triggerRedrawPulse = (target: RedrawTarget) => {
@@ -276,6 +649,9 @@ export default function App() {
   };
 
   const playAssistantSpeech = async (text: string) => {
+    if (!ENABLE_LEGACY_V1_BACKEND) {
+      return;
+    }
     if (!sessionId || !projectId || !text.trim()) {
       return;
     }
@@ -312,8 +688,11 @@ export default function App() {
       return url;
     }
 
-    const apiBase = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4000/api/v1';
-    return `${apiBase.replace(/\/api\/v1\/?$/, '')}${url}`;
+    if (!legacyApiBaseUrl) {
+      return url;
+    }
+
+    return `${legacyApiBaseUrl.replace(/\/api\/v1\/?$/, '')}${url}`;
   };
 
   const applyProjectState = (project: {
@@ -336,6 +715,197 @@ export default function App() {
     setHistoryCount(project.historyCount ?? 0);
   };
 
+  const handleUseLatestTranscriptForV2 = () => {
+    const transcript = userSpeechSub.trim();
+    if (!transcript) {
+      setV2UiError('当前还没有可复用的语音转写文本。');
+      setV2UiErrorDiagnostic(null);
+      return;
+    }
+    clearV2UiError();
+    setV2PromptText(transcript);
+  };
+
+  const startV2DrawingJobFromText = async (rawPrompt: string) => {
+    const prompt = rawPrompt.trim();
+    if (isV2ActionBusy) {
+      return;
+    }
+    if (!prompt) {
+      setV2UiError('请先输入或填入一段用于 v2 生成的描述文本。');
+      setV2UiErrorDiagnostic(null);
+      return;
+    }
+
+    setIsV2Submitting(true);
+    clearV2UiError();
+    setV2Job(null);
+    setV2FinalAsset(null);
+    setV2PlaybackManifestAsset(null);
+    setV2LastEventType(null);
+    setV2EventLog([]);
+    setV2FlowMessage('正在创建 drawing job...');
+    resetV2Tracking();
+    resetV2Playback();
+    clearPersistedV2EventSeq();
+
+    try {
+      const created = await createDrawingJob(prompt, {
+        locale: 'zh-CN',
+        clientSessionId: sessionId ?? undefined,
+        projectHint: projectId ?? undefined,
+        qualityProfile: 'high'
+      });
+
+      persistV2CurrentJob(created.jobId);
+      v2ActiveJobIdRef.current = created.jobId;
+      await refreshV2JobSnapshot(created.jobId);
+      trackV2Job(created.jobId);
+      void refreshV2RecentJobs({ silent: true });
+      pushLog('system', `V2 drawing job 已创建：${created.jobId}`);
+    } catch (error) {
+      console.error('Creating v2 drawing job failed.', error);
+      setV2ErrorFromUnknown(error, '创建 v2 drawing job 失败。');
+      setV2FlowMessage('未能创建 drawing job。');
+    } finally {
+      setIsV2Submitting(false);
+    }
+  };
+
+  const handleStartV2DrawingJob = async () => {
+    await startV2DrawingJobFromText(v2PromptText);
+  };
+
+  const handleRetryV2DrawingJob = async () => {
+    if (!v2Job || v2Job.status !== 'failed' || !v2Job.error?.retryable || isV2ActionBusy) {
+      return;
+    }
+
+    setIsV2Retrying(true);
+    clearV2UiError();
+    try {
+      const retried = await retryDrawingJob(v2Job.jobId, {
+        fromPhase: v2Job.error?.phase,
+        reason: 'frontend-stage7-retry'
+      });
+      setV2FinalAsset(null);
+      setV2PlaybackManifestAsset(null);
+      setV2LastEventType(null);
+      setV2EventLog([]);
+      resetV2Playback();
+      clearPersistedV2EventSeq();
+      persistV2CurrentJob(retried.jobId);
+      v2ActiveJobIdRef.current = retried.jobId;
+      await refreshV2JobSnapshot(retried.jobId);
+      trackV2Job(retried.jobId);
+      void refreshV2RecentJobs({ silent: true });
+      setV2FlowMessage(`已创建新的重试任务：${retried.jobId}，来源任务：${retried.retryOfJobId}。`);
+    } catch (error) {
+      console.error('Retrying v2 drawing job failed.', error);
+      setV2ErrorFromUnknown(error, '重试 v2 drawing job 失败。');
+    } finally {
+      setIsV2Retrying(false);
+    }
+  };
+
+  const handleCancelV2DrawingJob = async () => {
+    if (!v2Job || isTerminalV2Status(v2Job.status) || isV2ActionBusy) {
+      return;
+    }
+
+    setIsV2Cancelling(true);
+    clearV2UiError();
+    try {
+      const cancelled = await cancelDrawingJob(v2Job.jobId, 'frontend-stage7-cancel');
+      setV2Job(cancelled);
+      persistV2CurrentJob(cancelled.jobId);
+      setV2FlowMessage('drawing job 已取消，可作为历史任务查看。');
+      stopV2Polling();
+      stopV2Subscription();
+      setIsV2PlaybackRunning(false);
+      void refreshV2RecentJobs({ silent: true });
+    } catch (error) {
+      console.error('Cancelling v2 drawing job failed.', error);
+      setV2ErrorFromUnknown(error, '取消 v2 drawing job 失败。');
+    } finally {
+      setIsV2Cancelling(false);
+    }
+  };
+
+  const handleSelectV2RecentJob = async (jobId: string) => {
+    if (v2Job?.jobId === jobId) {
+      v2ActiveJobIdRef.current = jobId;
+      await refreshV2JobSnapshot(jobId).catch((error) => {
+        if ((error as Error & { status?: number }).status === 404) {
+          clearPersistedV2Job();
+          v2ActiveJobIdRef.current = null;
+        }
+        setV2ErrorFromUnknown(error, '刷新历史任务失败。');
+      });
+      return;
+    }
+
+    clearV2UiError();
+    setV2LastEventType(null);
+    setV2EventLog([]);
+    setV2FlowMessage('正在打开历史 drawing job...');
+    resetV2Tracking();
+    resetV2Playback();
+    clearPersistedV2EventSeq();
+    setV2FinalAsset(null);
+    setV2PlaybackManifestAsset(null);
+
+    try {
+      v2ActiveJobIdRef.current = jobId;
+      const job = await refreshV2JobSnapshot(jobId);
+      if (!isTerminalV2Status(job.status)) {
+        trackV2Job(jobId);
+      }
+    } catch (error) {
+      console.error('Opening recent v2 drawing job failed.', error);
+      v2ActiveJobIdRef.current = null;
+      if ((error as Error & { status?: number }).status === 404 || (error as Error & { status?: number }).status === 400) {
+        clearPersistedV2Job();
+      }
+      setV2ErrorFromUnknown(error, '打开历史任务失败。');
+      setV2FlowMessage('未能打开历史 drawing job。');
+    }
+  };
+
+  const restoreV2JobFromStorage = async () => {
+    const savedJobId = readPersistedV2JobId();
+    if (!savedJobId || v2ActiveJobIdRef.current === savedJobId) {
+      return;
+    }
+
+    const savedAfterSeq = readPersistedV2EventSeq();
+    clearV2UiError();
+    setV2LastEventType(null);
+    setV2EventLog([]);
+    setV2FlowMessage('正在恢复上次查看的 v2 drawing job...');
+    resetV2Tracking();
+    resetV2Playback();
+    setV2FinalAsset(null);
+    setV2PlaybackManifestAsset(null);
+
+    try {
+      v2ActiveJobIdRef.current = savedJobId;
+      const job = await refreshV2JobSnapshot(savedJobId);
+      if (!isTerminalV2Status(job.status)) {
+        setV2FlowMessage('已恢复上次任务，正在继续跟踪。');
+        trackV2Job(savedJobId, { afterSeq: savedAfterSeq });
+      } else if (isTerminalV2Status(job.status)) {
+        setV2FlowMessage(`已恢复历史任务：${describeV2Status(job)}`);
+      }
+    } catch (error) {
+      console.error('Restoring persisted v2 drawing job failed.', error);
+      v2ActiveJobIdRef.current = null;
+      clearPersistedV2Job();
+      setV2ErrorFromUnknown(error, '恢复上次 v2 drawing job 失败。');
+      setV2FlowMessage('已清理不可恢复的 v2 drawing job。');
+    }
+  };
+
   // Push welcome instructions on load
   useEffect(() => {
     pushLog('system', '🎨 AI 语音数位绘画工作台控制引擎就绪。');
@@ -346,6 +916,7 @@ export default function App() {
       if (redrawPulseTimerRef.current) {
         clearTimeout(redrawPulseTimerRef.current);
       }
+      resetV2Tracking();
       cleanupRecordingResources();
       cleanupRealtimeAudio();
       cleanupRealtimeSocket();
@@ -353,6 +924,20 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    void refreshV2RuntimeReadiness();
+    void refreshV2RecentJobs();
+    if (!v2RestoreStartedRef.current) {
+      v2RestoreStartedRef.current = true;
+      void restoreV2JobFromStorage();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!ENABLE_LEGACY_V1_BACKEND) {
+      pushLog('system', '旧 Node/V1 后端已从默认流程移除；当前只使用 Python backend v2。');
+      return;
+    }
+
     if (bootstrapStartedRef.current) {
       return;
     }
@@ -529,6 +1114,19 @@ export default function App() {
   const interpretVoiceCommand = async (rawText: string) => {
     const text = rawText.trim();
     if (!text) return;
+
+    const isControlCommand = /^(确定|确认|取消|放弃|不要了|暂停|停一下|先停|继续|接着|回放|重新放|重演|撤销|上一步|撤消|重做|恢复下一步|前进)\b/.test(text);
+    if (!isControlCommand) {
+      setV2PromptText(text);
+    }
+
+    if (ENABLE_V2_VOICE_DRAWING && !isControlCommand) {
+      pushLog('user', text);
+      setUserSpeechSub(text);
+      pushLog('system', '已将语音绘图描述发送到 Python v2 Drawing Job。');
+      await startV2DrawingJobFromText(text);
+      return;
+    }
 
     if (/确定|确认|ok|好的|开始|没错|绘制|可以/.test(text) && isAwaitingConfirm) {
       pushLog('user', text);
@@ -857,7 +1455,7 @@ export default function App() {
     const confirmedTranscript = userSpeechSub;
     const confirmedReplyText = aiSpeechSub;
 
-    if (pendingInterpretation && projectId && sessionId) {
+    if (ENABLE_LEGACY_V1_BACKEND && pendingInterpretation && projectId && sessionId) {
       try {
         const confirmed = await confirmCommand({
           interpretationId: pendingInterpretation.interpretationId,
@@ -993,6 +1591,10 @@ export default function App() {
     operations?: DrawingOperation[];
   }) => {
     if (!projectId || !sessionId || serverRevision === null) {
+      return;
+    }
+
+    if (!ENABLE_LEGACY_V1_BACKEND) {
       return;
     }
 
@@ -1227,7 +1829,7 @@ export default function App() {
   };
 
   const handleUndo = async () => {
-    if (projectId && sessionId && serverRevision !== null && historyCount > 0) {
+    if (ENABLE_LEGACY_V1_BACKEND && projectId && sessionId && serverRevision !== null && historyCount > 0) {
       try {
         const restored = await undoProject({
           projectId,
@@ -1268,7 +1870,7 @@ export default function App() {
   };
 
   const handleRedo = async () => {
-    if (projectId && sessionId && serverRevision !== null && redoCount > 0) {
+    if (ENABLE_LEGACY_V1_BACKEND && projectId && sessionId && serverRevision !== null && redoCount > 0) {
       try {
         const restored = await redoProject({
           projectId,
@@ -1361,7 +1963,7 @@ export default function App() {
   };
 
   const handleReplay = async () => {
-    if (projectId && sessionId) {
+    if (ENABLE_LEGACY_V1_BACKEND && projectId && sessionId) {
       try {
         const projectHistory = await getProjectHistory({
           projectId,
@@ -1431,6 +2033,11 @@ export default function App() {
       setIsListening(false);
       setSystemState('等待指令');
       pushLog('system', '麦克风监听关闭。');
+      return;
+    }
+
+    if (ENABLE_V2_VOICE_DRAWING) {
+      startWebSpeechFallback('Python v2 语音绘图模式：使用浏览器识别，结果直接发送到 backend。');
       return;
     }
 
@@ -1700,7 +2307,10 @@ export default function App() {
   };
 
   const toRealtimeAsrUrl = () => {
-    const httpBase = apiBaseUrl.replace(/\/api\/v1\/?$/, '');
+    if (!legacyApiBaseUrl) {
+      throw new Error('Legacy v1 realtime ASR backend is disabled.');
+    }
+    const httpBase = legacyApiBaseUrl.replace(/\/api\/v1\/?$/, '');
     const wsBase = httpBase.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
     return `${wsBase}/api/v1/voice/asr/realtime`;
   };
@@ -1769,6 +2379,11 @@ export default function App() {
   };
 
   const handleRecordedAudio = async (audio: Blob) => {
+    if (!ENABLE_LEGACY_V1_BACKEND) {
+      startWebSpeechFallback('旧 Node/V1 录音 ASR 已移除，切换浏览器 Web Speech。');
+      return;
+    }
+
     if (!sessionId || !projectId) {
       startWebSpeechFallback('工程会话尚未就绪，切换 Web Speech。');
       return;
@@ -1864,6 +2479,160 @@ export default function App() {
     recognitionRef.current = r;
     r.start();
   };
+
+  const v2FinalSrc = v2FinalAsset
+    ? buildAssetContentUrl(v2FinalAsset)
+    : v2Job?.finalAssetId
+      ? buildAssetContentUrl(v2Job.finalAssetId)
+      : null;
+  const v2LayerAssets: LayerAsset[] = v2Job?.layerAssets ?? [];
+  const v2LayerAssetsById = new Map<string, LayerAsset>(v2LayerAssets.map((layer) => [layer.assetId, layer]));
+  const v2PlaybackSteps: PlaybackManifestStep[] = [...(v2Job?.playbackManifest?.steps ?? [])].sort(
+    (left, right) => left.order - right.order
+  );
+  const v2PlaybackProcess = v2Job?.playbackManifest?.process ?? null;
+  const v2PlaybackDurationMs = v2Job?.playbackManifest?.durationMs ?? 0;
+  const v2PlaybackSignature = `${v2Job?.jobId ?? 'none'}:${v2Job?.playbackManifestAssetId ?? 'none'}`;
+  const v2PlaybackLayers = v2PlaybackSteps
+    .map((step, stepIndex) => {
+      const layer = step.assetId ? v2LayerAssetsById.get(step.assetId) : undefined;
+      if (!layer) {
+        return null;
+      }
+      return {
+        step,
+        stepIndex,
+        layer,
+        src: buildAssetContentUrl({
+          assetId: layer.assetId,
+          contentUrl: layer.contentUrl,
+        }),
+      };
+    })
+    .filter((entry): entry is { step: PlaybackManifestStep; stepIndex: number; layer: LayerAsset; src: string } => entry !== null);
+  const v2HasProcessPlayback = !!v2PlaybackProcess && !!v2FinalSrc;
+  const v2HasPlayableManifest = (v2PlaybackLayers.length > 0 || v2HasProcessPlayback) && v2PlaybackDurationMs > 0;
+  let v2CurrentPlaybackStepIndex = -1;
+  for (let index = 0; index < v2PlaybackSteps.length; index += 1) {
+    const step = v2PlaybackSteps[index];
+    if (v2PlaybackElapsedMs >= step.startMs) {
+      v2CurrentPlaybackStepIndex = index;
+    } else {
+      break;
+    }
+  }
+  const v2CurrentPlaybackStep =
+    v2CurrentPlaybackStepIndex >= 0 ? v2PlaybackSteps[v2CurrentPlaybackStepIndex] : v2PlaybackSteps[0] ?? null;
+  const canRetryV2Job = v2Job?.status === 'failed' && !!v2Job.error?.retryable && !isV2ActionBusy;
+  const canCancelV2Job = !!v2Job && !isTerminalV2Status(v2Job.status) && !isV2ActionBusy;
+  const v2ManifestStepCount = v2PlaybackSteps.length;
+  const v2RuntimeModes = v2RuntimeReadiness?.provider.modes;
+  const v2RuntimeNetworkLabel = v2RuntimeReadiness
+    ? v2RuntimeReadiness.provider.networkEnabled
+      ? 'live network enabled'
+      : v2RuntimeReadiness.provider.placeholder
+        ? 'placeholder offline'
+        : 'offline mock'
+    : isV2RuntimeLoading
+      ? 'loading'
+      : 'unavailable';
+  const formatV2JobTime = (value?: string | null) => {
+    if (!value) {
+      return '--';
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return '--';
+    }
+    return date.toLocaleString('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  };
+  const summarizeV2Input = (value: string) => {
+    const normalized = value.replace(/\s+/g, ' ').trim();
+    return normalized.length > 48 ? `${normalized.slice(0, 48)}...` : normalized || '(empty prompt)';
+  };
+
+  const getV2FrameStepLabel = (step: PlaybackManifestStep, index: number) => {
+    const roleLabels: Record<string, string> = {
+      sketch: '10% 草图',
+      lineart: '25% 线稿',
+      flat_color: '45% 平涂',
+      shadow: '65% 阴影',
+      lighting: '85% 光照',
+      details: '100% 完成'
+    };
+    const fallbackLabels = ['10% 草图', '25% 线稿', '45% 平涂', '65% 阴影', '85% 光照', '100% 完成'];
+    return roleLabels[step.role] ?? fallbackLabels[index] ?? step.label;
+  };
+
+  const getV2PlaybackOpacity = (step: PlaybackManifestStep, stepIndex: number) => {
+    return computeStepOpacity(step, v2PlaybackElapsedMs, stepIndex === v2PlaybackSteps.length - 1);
+  };
+  const v2PlaybackProgressPercent =
+    v2PlaybackDurationMs > 0 ? Math.min((v2PlaybackElapsedMs / v2PlaybackDurationMs) * 100, 100) : 0;
+  const v2MainPlaybackLabel = v2CurrentPlaybackStep
+    ? getV2FrameStepLabel(v2CurrentPlaybackStep, Math.max(v2CurrentPlaybackStepIndex, 0))
+    : '等待过程帧';
+  const v2MainPlaybackSummary = v2HasPlayableManifest
+    ? `${v2MainPlaybackLabel} · ${Math.round(v2PlaybackProgressPercent)}% · ${
+        v2PlaybackProcess ? `${v2PlaybackProcess.actions.length} 动作` : `${v2ManifestStepCount} 步`
+      }`
+    : '画布尺寸: 600 × 600 px (自适应视网膜屏幕)';
+
+  useEffect(() => {
+    if (!v2HasPlayableManifest) {
+      resetV2Playback();
+      return;
+    }
+
+    stopV2PlaybackLoop();
+    v2PlaybackStartedAtRef.current = null;
+    v2PlaybackBaseElapsedRef.current = 0;
+    setV2PlaybackElapsedMs(0);
+    setIsV2PlaybackRunning(v2Job?.status === 'completed' || v2Job?.status === 'playback_ready');
+  }, [v2PlaybackSignature, v2HasPlayableManifest, v2Job?.status]);
+
+  useEffect(() => {
+    if (!isV2PlaybackRunning || !v2HasPlayableManifest) {
+      stopV2PlaybackLoop();
+      v2PlaybackStartedAtRef.current = null;
+      return;
+    }
+
+    if (v2PlaybackStartedAtRef.current === null) {
+      v2PlaybackStartedAtRef.current = performance.now();
+    }
+
+    const tick = (now: number) => {
+      const nextElapsed = computePlaybackElapsed(
+        v2PlaybackBaseElapsedRef.current,
+        v2PlaybackStartedAtRef.current,
+        now,
+        v2PlaybackDurationMs
+      );
+      setV2PlaybackElapsedMs(nextElapsed);
+
+      if (nextElapsed >= v2PlaybackDurationMs) {
+        v2PlaybackBaseElapsedRef.current = v2PlaybackDurationMs;
+        v2PlaybackStartedAtRef.current = null;
+        setIsV2PlaybackRunning(false);
+        stopV2PlaybackLoop();
+        return;
+      }
+
+      v2PlaybackRafRef.current = window.requestAnimationFrame(tick);
+    };
+
+    v2PlaybackRafRef.current = window.requestAnimationFrame(tick);
+    return () => {
+      stopV2PlaybackLoop();
+    };
+  }, [isV2PlaybackRunning, v2HasPlayableManifest, v2PlaybackDurationMs, v2PlaybackSessionNonce]);
+
   return (
     <div className={`min-h-screen ${isLightMode ? 'bg-[#f4f5f8] text-slate-800' : 'bg-[#09090c] text-slate-100'} flex flex-col font-sans transition-colors duration-300 selection:bg-cyan-550 selection:text-black`}>
 
@@ -1961,34 +2730,145 @@ export default function App() {
                 <span className="text-[8px] tracking-wider text-cyan-400 font-mono bg-cyan-500/10 border border-cyan-500/20 px-1.5 py-0.5 rounded uppercase font-bold">2D 矢量动态画布</span>
               </div>
               <div className={`flex items-center gap-2 text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
-                <span>画板尺寸: 600 × 600 px (自适应视网膜屏幕)</span>
+                <span>{v2MainPlaybackSummary}</span>
               </div>
             </div>
 
             <div className="w-full">
-              <CanvasRenderer
-                progress={drawProgress}
-                config={characterConfig}
-                layers={layers}
-                isPaused={systemState === '已暂停'}
-                userSpeechSub={userSpeechSub}
-                aiSpeechSub={aiSpeechSub}
-                systemState={systemState}
-                isListening={isListening}
-                isAwaitingConfirm={isAwaitingConfirm}
-                onConfirmAction={handleConfirmAction}
-                onCancelAction={() => {
-                  setIsAwaitingConfirm(false);
-                  setPendingConfig(null);
-                  setPendingVerb(null);
-                  setPendingInterpretation(null);
-                  setSystemState('等待指令');
-                  setAiSpeechSub('好的，当前操作已取消，随时等候您的下一步指令。');
-                  pushLog('ai', '已取消前面的操作。');
-                }}
-                isLightMode={isLightMode}
-                lastRedrawTarget={lastRedrawTarget}
-              />
+              {v2HasPlayableManifest ? (
+                <div className={`rounded-xl border p-3 ${isLightMode ? 'bg-slate-50 border-slate-200' : 'bg-[#0c0d12] border-[#23232d]'}`}>
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className={`text-xs font-bold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>10% 到 100% 绘画过程</p>
+                      <p className={`mt-1 text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                        step {Math.max(v2CurrentPlaybackStepIndex + 1, 1)} / {v2ManifestStepCount}
+                        {v2CurrentPlaybackStep ? ` · ${v2MainPlaybackLabel}` : ''}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          if (isV2PlaybackRunning) {
+                            pauseV2Playback();
+                            return;
+                          }
+                          resumeV2Playback();
+                        }}
+                        className={`px-3 py-2 rounded-lg text-xs font-semibold border transition-colors ${
+                          isLightMode
+                            ? 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                            : 'bg-[#14141c] border-[#2b2b38] text-slate-200 hover:bg-[#1b1b25]'
+                        }`}
+                      >
+                        {isV2PlaybackRunning ? '暂停' : '播放'}
+                      </button>
+                      <button
+                        onClick={restartV2Playback}
+                        className={`px-3 py-2 rounded-lg text-xs font-semibold border transition-colors ${
+                          isLightMode
+                            ? 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                            : 'bg-[#14141c] border-[#2b2b38] text-slate-200 hover:bg-[#1b1b25]'
+                        }`}
+                      >
+                        重播
+                      </button>
+                    </div>
+                  </div>
+
+                  {v2HasProcessPlayback && v2PlaybackProcess && v2FinalSrc ? (
+                    <ProcessPlaybackPlayer
+                      process={v2PlaybackProcess}
+                      finalSrc={v2FinalSrc}
+                      elapsedMs={v2PlaybackElapsedMs}
+                      isLightMode={isLightMode}
+                    />
+                  ) : (
+                    <div className={`relative aspect-[4/3] w-full overflow-hidden rounded-xl border ${isLightMode ? 'bg-white border-slate-200' : 'bg-[#090a10] border-[#1f2230]'}`}>
+                      {v2FinalSrc && (
+                        <img
+                          src={v2FinalSrc}
+                          alt="V2 final composite background"
+                          className="absolute inset-0 h-full w-full object-cover"
+                          style={{ opacity: 0.08 }}
+                        />
+                      )}
+                      {v2PlaybackLayers.map(({ step, stepIndex, layer, src }) => (
+                        <img
+                          key={layer.assetId}
+                          src={src}
+                          alt={layer.label}
+                          className="absolute inset-0 h-full w-full object-cover transition-opacity duration-300"
+                          style={{
+                            opacity: getV2PlaybackOpacity(step, stepIndex),
+                            mixBlendMode: step.blendMode as React.CSSProperties['mixBlendMode'],
+                          }}
+                        />
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="mt-3 flex flex-col gap-2">
+                    <div className={`h-2 rounded-full overflow-hidden ${isLightMode ? 'bg-slate-200' : 'bg-[#1c1e28]'}`}>
+                      <div
+                        className="h-full bg-gradient-to-r from-cyan-400 via-sky-400 to-indigo-500 transition-all duration-150"
+                        style={{ width: `${v2PlaybackProgressPercent}%` }}
+                      />
+                    </div>
+                    <div className={`flex items-center justify-between text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                      <span>{Math.round(v2PlaybackElapsedMs)} ms</span>
+                      <span>{v2PlaybackDurationMs} ms</span>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-3">
+                    {v2PlaybackSteps.map((step, index) => (
+                      <div
+                        key={step.stepId}
+                        className={`rounded-lg border px-2.5 py-2 ${index === v2CurrentPlaybackStepIndex
+                          ? isLightMode
+                            ? 'bg-cyan-50 border-cyan-200'
+                            : 'bg-cyan-950/20 border-cyan-500/40'
+                          : isLightMode
+                            ? 'bg-white border-slate-200'
+                            : 'bg-[#10121a] border-[#23232d]'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <p className={`text-[11px] font-semibold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>{getV2FrameStepLabel(step, index)}</p>
+                          <span className={`text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>#{step.order}</span>
+                        </div>
+                        <p className={`mt-1 truncate text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                          {step.role} · {step.durationMs} ms
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <CanvasRenderer
+                  progress={drawProgress}
+                  config={characterConfig}
+                  layers={layers}
+                  isPaused={systemState === '已暂停'}
+                  userSpeechSub={userSpeechSub}
+                  aiSpeechSub={aiSpeechSub}
+                  systemState={systemState}
+                  isListening={isListening}
+                  isAwaitingConfirm={isAwaitingConfirm}
+                  onConfirmAction={handleConfirmAction}
+                  onCancelAction={() => {
+                    setIsAwaitingConfirm(false);
+                    setPendingConfig(null);
+                    setPendingVerb(null);
+                    setPendingInterpretation(null);
+                    setSystemState('等待指令');
+                    setAiSpeechSub('好的，当前操作已取消，随时等候您的下一步指令。');
+                    pushLog('ai', '已取消前面的操作。');
+                  }}
+                  isLightMode={isLightMode}
+                  lastRedrawTarget={lastRedrawTarget}
+                />
+              )}
             </div>
 
             {/* Audio warning and tips strip */}
@@ -2023,91 +2903,266 @@ export default function App() {
         {/* RIGHT COLUMN: INTEGRATED WORKSPACE COMPONENT STACK (5 COLS) */}
         <div className="lg:col-span-5 flex flex-col gap-5">
 
-          {/* SEC 1: SEMANTIC WORKSPACE LAYER BOARD */}
-          <div className="flex flex-col animate-fade-in shadow-xl">
-            <LayerPanel
-              layers={layers}
-              currentStage={currentStage}
-              onTogglePlayLayer={handleTogglePlayLayer}
-              isLightMode={isLightMode}
-            />
-          </div>
-
-          {/* SEC 2: CHARACTER ATOMIC VECTOR TRAITS CARD */}
-          <div className={`w-full flex flex-col ${isLightMode ? 'bg-[#ffffff] border-[#e2e8f0]' : 'bg-[#111115] border-[#23232d]'} rounded-xl p-4.5 gap-4.5 shadow-xl animate-fade-in`}>
-            <div className="flex items-center justify-between">
-              <div className={`flex items-center gap-2 text-xs ${isLightMode ? 'text-slate-805 text-slate-800' : 'text-neutral-300'} font-bold uppercase tracking-wider font-mono`}>
-                <Info className="w-4 h-4 text-cyan-500" />
-                <span>智能属性特征解码 (Decoded Traits)</span>
+          <div className={`w-full flex flex-col gap-4 ${isLightMode ? 'bg-[#ffffff] border-[#e2e8f0]' : 'bg-[#111115] border-[#23232d]'} rounded-xl p-4.5 shadow-xl animate-fade-in`}>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className={`flex items-center gap-2 text-xs ${isLightMode ? 'text-slate-800' : 'text-slate-200'} font-bold uppercase tracking-wider font-mono`}>
+                  <Sparkles className="w-4 h-4 text-cyan-500" />
+                  <span>Python v2 Drawing Job</span>
+                </div>
+                <p className={`mt-1 text-[11px] leading-relaxed ${isLightMode ? 'text-slate-600' : 'text-slate-400'}`}>
+                  这条链路直接接到 `backend` 的异步 drawing job。提交后等待帧生成完成，再展示 10% 到 100% 的绘画过程。
+                </p>
               </div>
-              <span className="text-[10px] font-mono text-emerald-650 border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-0.5 rounded uppercase font-extrabold shadow-sm">
-                实时属性特征析出
+              <span className={`text-[10px] font-mono px-2 py-1 rounded border ${isLightMode ? 'bg-slate-50 border-slate-200 text-slate-500' : 'bg-[#181822] border-[#2d2d3c] text-slate-400'}`}>
+                {drawingApiBaseUrl}
               </span>
             </div>
 
-            <div className="grid grid-cols-2 gap-3 text-xs font-sans">
-              <div className={`p-2.5 rounded-lg border ${isLightMode ? 'bg-slate-50 border-slate-200 hover:border-slate-300' : 'bg-[#181822] border-[#1e1e27] hover:border-neutral-700'} transition-colors`}>
-                <p className="text-neutral-500 text-[10px] font-mono leading-none mb-1.5">性别/形式</p>
-                <p className={`font-extrabold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>{characterConfig.gender === 'female' ? '🌸 二次元少女' : '少年/男生'}</p>
+            <div className={`rounded-lg border p-3 ${isLightMode ? 'bg-slate-50 border-slate-200' : 'bg-[#0c0d12] border-[#23232d]'}`}>
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className={`text-xs font-bold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>Runtime Readiness</p>
+                  <p className={`mt-1 text-[11px] ${isLightMode ? 'text-slate-600' : 'text-slate-400'}`}>
+                    {v2RuntimeError ?? `${v2RuntimeReadiness?.provider.profile ?? 'unknown'} · ${v2RuntimeNetworkLabel}`}
+                  </p>
+                </div>
+                <button
+                  onClick={() => void refreshV2RuntimeReadiness()}
+                  disabled={isV2RuntimeLoading}
+                  className={`px-2.5 py-1.5 rounded-lg text-[10px] font-semibold border transition-colors ${
+                    isV2RuntimeLoading
+                      ? 'opacity-50 cursor-not-allowed bg-transparent border-slate-300 text-slate-400'
+                      : isLightMode
+                        ? 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                        : 'bg-[#14141c] border-[#2b2b38] text-slate-200 hover:bg-[#1b1b25]'
+                  }`}
+                >
+                  {isV2RuntimeLoading ? '刷新中' : '刷新'}
+                </button>
               </div>
-              <div className={`p-2.5 rounded-lg border ${isLightMode ? 'bg-slate-50 border-slate-200 hover:border-slate-300' : 'bg-[#181822] border-[#1e1e27] hover:border-neutral-700'} transition-colors`}>
-                <p className="text-neutral-500 text-[10px] font-mono leading-none mb-1.5">发型特征</p>
-                <p className={`font-extrabold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>{characterConfig.hairLength === 'long' ? '💇‍♀️ 飘逸长发' : '💇‍♂️ 短发狼尾'}</p>
-              </div>
-              <div className={`p-2.5 rounded-lg border ${isLightMode ? 'bg-slate-50 border-slate-200 hover:border-slate-300' : 'bg-[#181822] border-[#1e1e27] hover:border-neutral-700'} transition-colors`}>
-                <p className="text-neutral-500 text-[10px] font-mono leading-none mb-1.5">发缕着色</p>
-                <p className={`font-extrabold ${isLightMode ? 'text-slate-800' : 'text-slate-200'} flex items-center gap-1.5`}>
-                  <span className="w-2.5 h-2.5 rounded-full border border-white/10 shrink-0" style={{ backgroundColor: characterConfig.hairColor === 'gold' ? '#fcc21b' : characterConfig.hairColor }} />
-                  <span>{characterConfig.hairColor === 'blue' && '湖蓝色'}
-                        {characterConfig.hairColor === 'pink' && '蜜桃粉'}
-                        {characterConfig.hairColor === 'purple' && '极光紫'}
-                        {characterConfig.hairColor === 'gold' && '璀璨金'}
-                        {characterConfig.hairColor === 'black' && '曜石黑'}</span>
-                </p>
-              </div>
-              <div className={`p-2.5 rounded-lg border ${isLightMode ? 'bg-slate-50 border-slate-200 hover:border-slate-300' : 'bg-[#181822] border-[#1e1e27] hover:border-neutral-700'} transition-colors`}>
-                <p className="text-neutral-500 text-[10px] font-mono leading-none mb-1.5">瞳孔色基因</p>
-                <p className={`font-extrabold ${isLightMode ? 'text-slate-800' : 'text-slate-200'} flex items-center gap-1.5`}>
-                  <span className="w-2.5 h-2.5 rounded-full border border-white/10 shrink-0" style={{ backgroundColor: characterConfig.eyeColor }} />
-                  <span>{characterConfig.eyeColor === 'blue' && '闪耀蓝'}
-                        {characterConfig.eyeColor === 'purple' && '深邃紫'}
-                        {characterConfig.eyeColor === 'red' && '烈焰红'}
-                        {characterConfig.eyeColor === 'gold' && '璀璨金'}
-                        {characterConfig.eyeColor === 'green' && '翡翠绿'}
-                        {characterConfig.eyeColor === 'pink' && '樱落粉'}</span>
-                </p>
-              </div>
-              <div className={`p-2.5 rounded-lg border ${isLightMode ? 'bg-slate-50 border-slate-200 hover:border-slate-300' : 'bg-[#181822] border-[#1e1e27] hover:border-neutral-700'} transition-colors`}>
-                <p className="text-neutral-500 text-[10px] font-mono leading-none mb-1.5">嘴角表情</p>
-                <p className={`font-extrabold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>😀 {characterConfig.expression}</p>
-              </div>
-              <div className={`p-2.5 rounded-lg border ${isLightMode ? 'bg-slate-50 border-slate-200 hover:border-slate-300' : 'bg-[#181822] border-[#1e1e27] hover:border-neutral-700'} transition-colors`}>
-                <p className="text-neutral-500 text-[10px] font-mono leading-none mb-1.5">挂戴配饰</p>
-                <p className={`font-extrabold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>
-                  👓 {characterConfig.accessory === 'glasses' ? '重塑红框圆镜' : characterConfig.accessory === 'butterfly_knot' ? '蝴蝶挂戴发结' : '无配饰'}
-                </p>
+              <div className={`mt-2 flex flex-wrap gap-2 text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                <span>runner: {v2RuntimeReadiness?.workflow.runnerMode ?? '--'}</span>
+                <span>network: {v2RuntimeNetworkLabel}</span>
+                <span>text: {v2RuntimeModes?.text ?? '--'}</span>
+                <span>内部构图: {v2RuntimeModes?.preview ?? '--'}</span>
+                <span>final: {v2RuntimeModes?.final ?? '--'}</span>
+                <span>layers: {v2RuntimeModes?.layers ?? '--'}</span>
               </div>
             </div>
 
-            {/* Quick check verification line */}
-            <div className={`text-[10px] ${isLightMode ? 'bg-slate-50 border-slate-200 text-slate-500' : 'text-slate-500 bg-[#0c0c10] border-[#1b1b24]'} p-2.5 rounded-lg font-mono flex flex-col gap-1 leading-relaxed`}>
-              <span className={`${isLightMode ? 'text-slate-705' : 'text-[#888]'} font-bold uppercase`}>🧬 NLP 隔离解耦热编译状态</span>
-              <div className="flex justify-between">
-                <span>分层机制: 6 属性独立插槽控制</span>
-                <span className="text-teal-600 font-bold">CHECKSUM √</span>
+            <div className="flex flex-col gap-2">
+              <label className={`text-[11px] font-semibold ${isLightMode ? 'text-slate-700' : 'text-slate-300'}`}>
+                输入绘图描述，或直接用语音说一句；普通绘图描述会自动创建 Python v2 job
+              </label>
+              <textarea
+                value={v2PromptText}
+                onChange={(event) => setV2PromptText(event.target.value)}
+                rows={4}
+                placeholder="例如：画一个蓝色长发的二次元女生半身像，水彩风，带柔和光影"
+                className={`w-full resize-none rounded-lg border px-3 py-2 text-sm leading-relaxed outline-none transition-colors ${
+                  isLightMode
+                    ? 'bg-slate-50 border-slate-200 text-slate-900 placeholder:text-slate-400 focus:border-cyan-400'
+                    : 'bg-[#0f1016] border-[#2a2a36] text-slate-100 placeholder:text-slate-500 focus:border-cyan-500'
+                }`}
+              />
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={handleUseLatestTranscriptForV2}
+                  className={`px-3 py-2 rounded-lg text-xs font-semibold border transition-colors ${
+                    isLightMode
+                      ? 'bg-slate-100 border-slate-300 text-slate-700 hover:bg-slate-200'
+                      : 'bg-[#181822] border-[#2d2d3c] text-slate-200 hover:bg-[#222231]'
+                  }`}
+                >
+                  使用最近识别文本
+                </button>
+                <button
+                  onClick={() => void handleStartV2DrawingJob()}
+                  disabled={isV2ActionBusy || !v2PromptText.trim()}
+                  className={`px-3 py-2 rounded-lg text-xs font-semibold border transition-colors ${
+                    isV2ActionBusy || !v2PromptText.trim()
+                      ? 'opacity-50 cursor-not-allowed bg-transparent border-slate-300 text-slate-400'
+                      : 'bg-cyan-500 text-slate-950 border-cyan-400 hover:bg-cyan-400'
+                  }`}
+                >
+                  {isV2Submitting ? '创建中...' : '创建 v2 drawing job'}
+                </button>
+                <button
+                  onClick={() => void handleCancelV2DrawingJob()}
+                  disabled={!canCancelV2Job}
+                  className={`px-3 py-2 rounded-lg text-xs font-semibold border transition-colors ${
+                    !canCancelV2Job
+                      ? 'opacity-50 cursor-not-allowed bg-transparent border-slate-300 text-slate-400'
+                      : 'bg-transparent text-rose-400 border-rose-400/50 hover:bg-rose-500/10'
+                  }`}
+                >
+                  {isV2Cancelling ? '取消中...' : '取消任务'}
+                </button>
               </div>
             </div>
-          </div>
 
-          {/* SEC 3: DEMO ROADMAP SCRIPT HOTKEYS (ALWAYS ON DISPLAY) */}
-          <div className="flex flex-col animate-fade-in shadow-xl">
-            <DemoScriptPanel
-              systemState={systemState}
-              onSimulateCommand={handleSimulateCommand}
-              onSimulateConfirm={handleConfirmAction}
-              isAwaitingConfirm={isAwaitingConfirm}
-              isLightMode={isLightMode}
-            />
+            <div className={`rounded-lg border p-3 ${isLightMode ? 'bg-slate-50 border-slate-200' : 'bg-[#0c0d12] border-[#23232d]'}`}>
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className={`text-xs font-bold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>
+                    {v2Job ? `Job ${v2Job.jobId}` : '尚未创建任务'}
+                  </p>
+                  <p className={`mt-1 text-[11px] ${isLightMode ? 'text-slate-600' : 'text-slate-400'}`}>
+                    {v2UiError ?? v2FlowMessage}
+                  </p>
+                  {v2UiErrorDiagnostic && (
+                    <p className={`mt-1 text-[10px] font-mono ${isLightMode ? 'text-rose-600' : 'text-rose-300'}`}>
+                      {v2UiErrorDiagnostic}
+                    </p>
+                  )}
+                </div>
+                {v2Job && (
+                  <span className={`text-[11px] font-mono px-2 py-1 rounded border ${isLightMode ? 'bg-white border-slate-200 text-slate-700' : 'bg-[#14141c] border-[#2b2b38] text-slate-300'}`}>
+                    {v2Job.status} · {v2Job.progressPercent}%
+                  </span>
+                )}
+              </div>
+              {v2Job && (
+                <>
+                  <div className={`mt-3 h-2 rounded-full overflow-hidden ${isLightMode ? 'bg-slate-200' : 'bg-[#1c1e28]'}`}>
+                    <div
+                      className="h-full bg-gradient-to-r from-cyan-400 to-indigo-500 transition-all duration-300"
+                      style={{ width: `${Math.max(4, v2Job.progressPercent)}%` }}
+                    />
+                  </div>
+                  <div className={`mt-2 flex flex-wrap gap-2 text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                    <span>last event: {v2LastEventType ?? 'waiting'}</span>
+                    <span>{v2Job.requiresConfirmation ? '自动进入帧生成中' : '无需用户确认'}</span>
+                    {v2Job.retryOfJobId && <span>retry of: {v2Job.retryOfJobId}</span>}
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className={`rounded-lg border p-3 ${isLightMode ? 'bg-slate-50 border-slate-200' : 'bg-[#0c0d12] border-[#23232d]'}`}>
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className={`text-xs font-bold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>Recent Jobs</p>
+                  <p className={`mt-1 text-[11px] ${isLightMode ? 'text-slate-600' : 'text-slate-400'}`}>
+                    {v2RecentJobsError ?? (v2RecentJobs.length === 0 ? '还没有历史 v2 drawing job。' : '点击任意任务可重新打开快照。')}
+                  </p>
+                </div>
+                <button
+                  onClick={() => void refreshV2RecentJobs()}
+                  disabled={isV2RecentJobsLoading}
+                  className={`px-2.5 py-1.5 rounded-lg text-[10px] font-semibold border transition-colors ${
+                    isV2RecentJobsLoading
+                      ? 'opacity-50 cursor-not-allowed bg-transparent border-slate-300 text-slate-400'
+                      : isLightMode
+                        ? 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                        : 'bg-[#14141c] border-[#2b2b38] text-slate-200 hover:bg-[#1b1b25]'
+                  }`}
+                >
+                  {isV2RecentJobsLoading ? '加载中' : '刷新'}
+                </button>
+              </div>
+              {v2RecentJobs.length > 0 && (
+                <div className="mt-3 grid grid-cols-1 gap-2">
+                  {v2RecentJobs.map((job) => {
+                    const isCurrentJob = v2Job?.jobId === job.jobId;
+                    return (
+                      <button
+                        key={job.jobId}
+                        onClick={() => void handleSelectV2RecentJob(job.jobId)}
+                        disabled={isCurrentJob}
+                        className={`w-full rounded-lg border p-2.5 text-left transition-colors ${
+                          isCurrentJob
+                            ? isLightMode
+                              ? 'bg-cyan-50 border-cyan-200 cursor-default'
+                              : 'bg-cyan-950/20 border-cyan-500/40 cursor-default'
+                            : isLightMode
+                              ? 'bg-white border-slate-200 hover:bg-slate-100'
+                              : 'bg-[#10121a] border-[#23232d] hover:bg-[#161824]'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <p className={`min-w-0 truncate text-[11px] font-semibold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>
+                            {summarizeV2Input(job.inputText)}
+                          </p>
+                          <span className={`shrink-0 text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                            {job.status} · {job.progressPercent}%
+                          </span>
+                        </div>
+                        <div className={`mt-1 flex flex-wrap gap-2 text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                          <span>{formatV2JobTime(job.updatedAt)}</span>
+                          <span>{job.playbackManifestAssetId ? 'frames ready' : job.finalAssetId ? 'final ready' : job.previewAssetId ? 'frame generation' : 'no asset yet'}</span>
+                          {job.retryOfJobId && <span>retry of {job.retryOfJobId}</span>}
+                          {job.error && <span>{job.error.code}</span>}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {v2Job && !isTerminalV2Status(v2Job.status) && !v2HasPlayableManifest && (
+              <div className={`rounded-lg border p-3 text-[11px] ${isLightMode ? 'bg-cyan-50 border-cyan-200 text-cyan-700' : 'bg-cyan-950/20 border-cyan-500/30 text-cyan-200'}`}>
+                正在生成绘画过程帧。内部构图只在后端使用，用户侧直接等待 10% 到 100% 进度图。
+              </div>
+            )}
+
+            {v2Job?.status === 'failed' && (
+              <div className={`rounded-lg border p-3 ${isLightMode ? 'bg-rose-50 border-rose-200 text-rose-700' : 'bg-rose-950/20 border-rose-500/30 text-rose-200'}`}>
+                <p className="text-xs font-bold">任务失败</p>
+                <p className="mt-1 text-[11px] leading-relaxed">{v2Job.error?.message ?? 'unknown error'}</p>
+                {v2Job.error && (
+                  <p className="mt-1 text-[10px] font-mono">
+                    {v2Job.error.code} · {v2Job.error.phase} · retryable {v2Job.error.retryable ? 'yes' : 'no'}
+                  </p>
+                )}
+                <button
+                  onClick={() => void handleRetryV2DrawingJob()}
+                  disabled={!canRetryV2Job}
+                  className={`mt-3 px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                    !canRetryV2Job
+                      ? 'opacity-50 cursor-not-allowed bg-rose-300 text-white'
+                      : 'bg-rose-500 text-white hover:bg-rose-400'
+                  }`}
+                >
+                  {isV2Retrying ? '重试中...' : '重试任务'}
+                </button>
+              </div>
+            )}
+
+            {v2Job?.status === 'cancelled' && (
+              <div className={`rounded-lg border p-3 text-[11px] ${isLightMode ? 'bg-slate-100 border-slate-200 text-slate-600' : 'bg-[#181822] border-[#2d2d3c] text-slate-300'}`}>
+                当前 v2 drawing job 已取消，生成链路已停止，可作为历史任务查看。
+              </div>
+            )}
+
+            {v2Job?.status === 'completed' && (
+              <div className={`rounded-lg border p-3 text-[11px] ${isLightMode ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-emerald-950/20 border-emerald-500/30 text-emerald-200'}`}>
+                当前 v2 drawing job 已完成，绘画过程帧可继续查看和回放。
+              </div>
+            )}
+
+            {v2HasPlayableManifest && (
+              <div className={`rounded-lg border p-3 text-[11px] ${isLightMode ? 'bg-cyan-50 border-cyan-200 text-cyan-700' : 'bg-cyan-950/20 border-cyan-500/30 text-cyan-200'}`}>
+                绘画过程已接入主视角智能声控绘图板：{v2ManifestStepCount} 步
+                {v2PlaybackProcess ? ` · ${v2PlaybackProcess.actions.length} 动作` : ''}。
+              </div>
+            )}
+
+            {v2EventLog.length > 0 && (
+              <div className={`rounded-lg border p-3 ${isLightMode ? 'bg-slate-50 border-slate-200' : 'bg-[#0c0d12] border-[#23232d]'}`}>
+                <p className={`text-xs font-bold mb-2 ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>Recent Job Events</p>
+                <div className="space-y-1.5">
+                  {v2EventLog.slice(0, 6).map((event) => (
+                    <div key={event.eventId} className={`flex items-center justify-between gap-3 text-[10px] font-mono ${isLightMode ? 'text-slate-600' : 'text-slate-400'}`}>
+                      <span>{event.type}</span>
+                      <span>{event.status}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
         </div>
