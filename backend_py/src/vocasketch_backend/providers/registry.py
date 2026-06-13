@@ -6,6 +6,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from .base import ProviderGateway, ProviderProfile, ProviderRuntimeInfo
 from .config import ProviderConfig, ProviderConfigError
 from .mock import MockProviderGateway
+from .openai_text import OpenAITextProviderGateway
 from .placeholders import (
     ComfyUIProviderGateway,
     DashScopeProviderGateway,
@@ -13,6 +14,7 @@ from .placeholders import (
     OpenAIProviderGateway,
     build_placeholder_runtime_info,
 )
+from .transports import OpenAICompatibleTextTransport, TextGenerationTransport
 
 
 @dataclass(frozen=True)
@@ -31,9 +33,28 @@ def create_provider_gateway(config: ProviderConfig) -> ProviderBuildResult:
             profile=config.profile,
             required={
                 "VOCASKETCH_OPENAI_RESPONSE_MODEL": config.openai.responseModel,
-                "VOCASKETCH_OPENAI_IMAGE_MODEL": config.openai.imageModel,
             },
         )
+        if config.allowLiveRequests:
+            _require_live_fields(
+                profile=config.profile,
+                required={
+                    "VOCASKETCH_OPENAI_API_BASE_URL": config.openai.apiBaseUrl,
+                    "VOCASKETCH_OPENAI_API_KEY": config.openai.apiKey,
+                },
+            )
+            gateway = OpenAITextProviderGateway(
+                api_base_url=config.openai.apiBaseUrl or "",
+                safe_api_base_url=_sanitize_url(config.openai.apiBaseUrl),
+                api_key=config.openai.apiKey or "",
+                text_model=config.openai.responseModel or "",
+                image_model=config.openai.imageModel,
+                timeout_seconds=config.openai.timeoutSeconds,
+                text_transport=build_openai_text_transport(config),
+                asset_provider=MockProviderGateway(),
+            )
+            return ProviderBuildResult(gateway=gateway, runtime_info=gateway.runtime_info)
+
         gateway = OpenAIProviderGateway(
             build_placeholder_runtime_info(
                 profile=config.profile,
@@ -42,6 +63,7 @@ def create_provider_gateway(config: ProviderConfig) -> ProviderBuildResult:
                     "apiBaseUrl": _sanitize_url(config.openai.apiBaseUrl),
                     "responseModel": config.openai.responseModel,
                     "imageModel": config.openai.imageModel,
+                    "allowLiveRequests": False,
                 },
             )
         )
@@ -116,6 +138,19 @@ def _require_fields(*, profile: ProviderProfile, required: dict[str, str | None]
         missing_joined = ", ".join(missing)
         raise ProviderConfigError(
             f"Provider profile '{profile.value}' is not ready to start. Missing required non-secret configuration: {missing_joined}."
+        )
+
+
+def build_openai_text_transport(config: ProviderConfig) -> TextGenerationTransport:
+    return OpenAICompatibleTextTransport()
+
+
+def _require_live_fields(*, profile: ProviderProfile, required: dict[str, str | None]) -> None:
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        missing_joined = ", ".join(missing)
+        raise ProviderConfigError(
+            f"Provider profile '{profile.value}' live mode is not ready to start. Missing required configuration: {missing_joined}."
         )
 
 

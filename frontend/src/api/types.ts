@@ -151,3 +151,175 @@ export interface TtsResponse {
   durationMs: number;
   provider: 'dashscope';
 }
+
+export type JobStatus =
+  | 'queued'
+  | 'parsing'
+  | 'intent_ready'
+  | 'prompt_ready'
+  | 'preview_generating'
+  | 'preview_ready'
+  | 'final_generating'
+  | 'final_ready'
+  | 'layers_generating'
+  | 'layers_ready'
+  | 'playback_ready'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface ParsedIntent {
+  subject: string;
+  style: string;
+  composition: string;
+  constraints: string[];
+  edits: string[];
+  ambiguities: string[];
+  confidence: number;
+}
+
+export interface VisualBrief {
+  artDirection: string;
+  camera: string;
+  palette: string[];
+  mood: string;
+  characterSpec: string;
+  backgroundSpec: string;
+  negativeConstraints: string[];
+}
+
+export interface ImagePrompt {
+  model: string;
+  positivePrompt: string;
+  negativePrompt: string;
+  size: string;
+  guidance?: string | null;
+  seed?: number | null;
+}
+
+export interface AssetRecord {
+  assetId: string;
+  jobId: string;
+  kind: 'preview' | 'final' | 'layer' | 'manifest';
+  role: string;
+  mimeType: string;
+  url: string;
+  contentUrl?: string | null;
+  byteSize?: number | null;
+  checksum?: string | null;
+  width?: number | null;
+  height?: number | null;
+  storagePath?: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface LayerAsset {
+  assetId: string;
+  jobId: string;
+  role: string;
+  label: string;
+  mimeType: string;
+  width: number;
+  height: number;
+  url: string;
+  contentUrl?: string | null;
+  byteSize?: number | null;
+  checksum?: string | null;
+  storagePath?: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface PlaybackManifestStep {
+  step: number;
+  phase: string;
+  assetRole: string;
+  durationMs: number;
+  assetId?: string;
+  contentUrl?: string;
+}
+
+export interface PlaybackManifest {
+  manifestVersion: string;
+  canvasSize: {
+    width: number;
+    height: number;
+  };
+  durationMs: number;
+  steps: PlaybackManifestStep[];
+  layerRefs: string[];
+  finalCompositeAssetId?: string | null;
+}
+
+export interface JobError {
+  code: string;
+  phase: JobStatus;
+  message: string;
+  retryable: boolean;
+  provider?: string | null;
+  details: Record<string, unknown>;
+  timestamp: string;
+}
+
+export interface DrawingJob {
+  jobId: string;
+  status: JobStatus;
+  progressPercent: number;
+  inputText: string;
+  locale: string;
+  clientSessionId?: string | null;
+  projectHint?: string | null;
+  qualityProfile: string;
+  references: string[];
+  parsedIntent?: ParsedIntent | null;
+  visualBrief?: VisualBrief | null;
+  imagePrompt?: ImagePrompt | null;
+  previewAssetId?: string | null;
+  finalAssetId?: string | null;
+  playbackManifestAssetId?: string | null;
+  layerAssets: LayerAsset[];
+  playbackManifest?: PlaybackManifest | null;
+  requiresConfirmation: boolean;
+  error?: JobError | null;
+  retryOfJobId?: string | null;
+  simulateFailureAt?: JobStatus | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+  eventsUrl: string;
+}
+
+export interface DrawingJobCreatedEnvelope {
+  jobId: string;
+  status: JobStatus;
+  eventsUrl: string;
+}
+
+export interface DrawingJobRetryResponse {
+  jobId: string;
+  status: JobStatus;
+  eventsUrl: string;
+  retryOfJobId: string;
+}
+
+export interface JobEvent {
+  eventId: string;
+  jobId: string;
+  seq: number;
+  type:
+    | 'job.created'
+    | 'job.status_changed'
+    | 'intent.ready'
+    | 'prompt.ready'
+    | 'preview.ready'
+    | 'job.confirmed'
+    | 'final.ready'
+    | 'layers.ready'
+    | 'playback.ready'
+    | 'job.completed'
+    | 'job.failed'
+    | 'job.cancelled';
+  status: JobStatus;
+  payload: Record<string, unknown>;
+  timestamp: string;
+}
