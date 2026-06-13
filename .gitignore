@@ -18,6 +18,18 @@ frontend/.vite/
 logs/
 data/
 backend/data/
+backend/.venv/
+backend/__pycache__/
+backend/src/__pycache__/
+backend/tests/__pycache__/
+backend/**/*.pyc
+backend/src/**/*.pyc
+tools/__pycache__/
+.codex-run-logs/
+.playwright-cli/
+output/
+frontend/.tmp-frontend-dev.log
+frontend/.tmp-frontend-dev.err.log
 
 # OS and editor files
 .DS_Store
