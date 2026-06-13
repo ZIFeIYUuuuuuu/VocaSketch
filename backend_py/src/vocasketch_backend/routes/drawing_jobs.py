@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import re
-from collections.abc import Mapping
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, Query, Request, status
 from fastapi.responses import StreamingResponse
 
+from ..errors import api_error, redact_text, sanitize_error_payload
 from ..job_store import InvalidIdentifierError
 from ..models import (
     DrawingJob,
@@ -26,12 +23,6 @@ from ..models import (
 from ..workflow import WorkflowStateError
 
 router = APIRouter(prefix="/api/v2/drawing-jobs", tags=["drawing-jobs"])
-
-_SECRET_VALUE_PATTERN = re.compile(
-    r"(?i)(api[_-]?key|token|secret|authorization|password|bearer|cookie)(\s*[:=]\s*)([^\s,;&]+)"
-)
-_AUTHORIZATION_BEARER_PATTERN = re.compile(r"(?i)(authorization\s*[:=]\s*)bearer\s+[^\s,;&]+")
-_BEARER_PATTERN = re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+")
 
 
 @router.post("", response_model=DrawingJobCreatedEnvelope, status_code=status.HTTP_202_ACCEPTED)
@@ -103,25 +94,51 @@ async def get_drawing_job(job_id: str, request: Request) -> DrawingJobResponse:
     try:
         job = await store.get_job(job_id)
     except InvalidIdentifierError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        raise api_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="INVALID_JOB_ID",
+            message="invalid drawing job id",
+            details={"jobId": job_id},
+        ) from exc
     if not job:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="drawing job not found")
+        raise api_error(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="JOB_NOT_FOUND",
+            message="drawing job not found",
+            details={"jobId": job_id},
+        )
     return _to_response(job)
 
 
 @router.get("/{job_id}/events")
-async def stream_drawing_job_events(job_id: str, request: Request) -> StreamingResponse:
+async def stream_drawing_job_events(
+    job_id: str,
+    request: Request,
+    after_seq: str | None = Query(default=None, alias="afterSeq"),
+    since_seq: str | None = Query(default=None, alias="sinceSeq"),
+) -> StreamingResponse:
     store = request.app.state.job_store
     event_bus = request.app.state.event_bus
     try:
         job = await store.get_job(job_id)
     except InvalidIdentifierError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        raise api_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="INVALID_JOB_ID",
+            message="invalid drawing job id",
+            details={"jobId": job_id, "operation": "stream_events"},
+        ) from exc
     if not job:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="drawing job not found")
+        raise api_error(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="JOB_NOT_FOUND",
+            message="drawing job not found",
+            details={"jobId": job_id, "operation": "stream_events"},
+        )
 
+    event_after_seq = _parse_event_after_seq(after_seq=after_seq, since_seq=since_seq)
     return StreamingResponse(
-        event_bus.stream(job_id),
+        event_bus.stream(job_id, after_seq=event_after_seq),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -138,9 +155,19 @@ async def confirm_drawing_job(job_id: str, request: Request, body: DrawingJobCon
     try:
         job = await store.get_job(job_id)
     except InvalidIdentifierError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        raise api_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="INVALID_JOB_ID",
+            message="invalid drawing job id",
+            details={"jobId": job_id, "operation": "confirm"},
+        ) from exc
     if not job:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="drawing job not found")
+        raise api_error(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="JOB_NOT_FOUND",
+            message="drawing job not found",
+            details={"jobId": job_id, "operation": "confirm"},
+        )
 
     try:
         job = await workflow.confirm_job(
@@ -149,7 +176,12 @@ async def confirm_drawing_job(job_id: str, request: Request, body: DrawingJobCon
             notes=body.notes,
         )
     except WorkflowStateError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise api_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="WORKFLOW_STATE_CONFLICT",
+            message=str(exc),
+            details={"jobId": job_id, "operation": "confirm"},
+        ) from exc
     return _to_response(job)
 
 
@@ -160,14 +192,29 @@ async def cancel_drawing_job(job_id: str, request: Request, body: DrawingJobCanc
     try:
         job = await store.get_job(job_id)
     except InvalidIdentifierError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        raise api_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="INVALID_JOB_ID",
+            message="invalid drawing job id",
+            details={"jobId": job_id, "operation": "cancel"},
+        ) from exc
     if not job:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="drawing job not found")
+        raise api_error(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="JOB_NOT_FOUND",
+            message="drawing job not found",
+            details={"jobId": job_id, "operation": "cancel"},
+        )
 
     try:
         job = await workflow.cancel_job(job_id, body.reason)
     except WorkflowStateError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise api_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="WORKFLOW_STATE_CONFLICT",
+            message=str(exc),
+            details={"jobId": job_id, "operation": "cancel"},
+        ) from exc
     return _to_response(job)
 
 
@@ -178,9 +225,19 @@ async def retry_drawing_job(job_id: str, request: Request, body: DrawingJobRetry
     try:
         job = await store.get_job(job_id)
     except InvalidIdentifierError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        raise api_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="INVALID_JOB_ID",
+            message="invalid drawing job id",
+            details={"jobId": job_id, "operation": "retry"},
+        ) from exc
     if not job:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="drawing job not found")
+        raise api_error(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="JOB_NOT_FOUND",
+            message="drawing job not found",
+            details={"jobId": job_id, "operation": "retry"},
+        )
 
     try:
         retry_job = await workflow.retry_job(
@@ -189,7 +246,12 @@ async def retry_drawing_job(job_id: str, request: Request, body: DrawingJobRetry
             reason=body.reason,
         )
     except WorkflowStateError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise api_error(
+            status_code=status.HTTP_409_CONFLICT,
+            code="WORKFLOW_STATE_CONFLICT",
+            message=str(exc),
+            details={"jobId": job_id, "operation": "retry"},
+        ) from exc
 
     return DrawingJobRetryResponse(
         jobId=retry_job.jobId,
@@ -202,9 +264,32 @@ async def retry_drawing_job(job_id: str, request: Request, body: DrawingJobRetry
 def _to_response(job: DrawingJob) -> DrawingJobResponse:
     payload = job.model_dump(mode="json")
     if payload.get("error"):
-        payload["error"] = _sanitize_error_payload(payload["error"])
+        payload["error"] = sanitize_error_payload(payload["error"])
     payload["eventsUrl"] = f"/api/v2/drawing-jobs/{job.jobId}/events"
     return DrawingJobResponse.model_validate(payload)
+
+
+def _parse_event_after_seq(*, after_seq: str | None, since_seq: str | None) -> int:
+    raw_value = after_seq if after_seq is not None else since_seq
+    if raw_value is None or raw_value == "":
+        return 0
+    try:
+        parsed = int(raw_value)
+    except ValueError as exc:
+        raise api_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="INVALID_EVENT_SEQUENCE",
+            message="afterSeq/sinceSeq must be a non-negative integer",
+            details={"afterSeq": after_seq, "sinceSeq": since_seq},
+        ) from exc
+    if parsed < 0:
+        raise api_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="INVALID_EVENT_SEQUENCE",
+            message="afterSeq/sinceSeq must be a non-negative integer",
+            details={"afterSeq": after_seq, "sinceSeq": since_seq},
+        )
+    return parsed
 
 
 def _to_summary(job: DrawingJob) -> DrawingJobSummary:
@@ -229,66 +314,7 @@ def _to_error_summary(error: JobError | None) -> JobErrorSummary | None:
     return JobErrorSummary(
         code=error.code,
         phase=error.phase,
-        message=_redact_text(error.message),
+        message=redact_text(error.message),
         retryable=error.retryable,
         provider=error.provider,
-    )
-
-
-def _redact_text(value: str) -> str:
-    redacted = _AUTHORIZATION_BEARER_PATTERN.sub(r"\1Bearer ***", value)
-    redacted = _SECRET_VALUE_PATTERN.sub(r"\1\2***", redacted)
-    redacted = _BEARER_PATTERN.sub("Bearer ***", redacted)
-    return re.sub(r"https?://[^\s,]+", lambda match: _redact_url(match.group(0)), redacted)
-
-
-def _redact_url(value: str) -> str:
-    parts = urlsplit(value)
-    if not parts.query:
-        return value
-    redacted_query = urlencode([(key, "***") for key, _ in parse_qsl(parts.query, keep_blank_values=True)])
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, redacted_query, ""))
-
-
-def _sanitize_error_payload(error_payload: dict) -> dict:
-    sanitized = dict(error_payload)
-    if isinstance(sanitized.get("message"), str):
-        sanitized["message"] = _redact_text(sanitized["message"])
-    if isinstance(sanitized.get("provider"), str):
-        sanitized["provider"] = _redact_text(sanitized["provider"])
-    sanitized["details"] = _sanitize_error_value(sanitized.get("details", {}), parent_key="details")
-    return sanitized
-
-
-def _sanitize_error_value(value: object, *, parent_key: str) -> object:
-    if _is_sensitive_key(parent_key):
-        return "***"
-    if isinstance(value, str):
-        return _redact_text(value)
-    if isinstance(value, Mapping):
-        sanitized: dict[str, object] = {}
-        for raw_key, raw_value in value.items():
-            key = str(raw_key)
-            sanitized[key] = _sanitize_error_value(raw_value, parent_key=key)
-        return sanitized
-    if isinstance(value, list):
-        return [_sanitize_error_value(item, parent_key=parent_key) for item in value]
-    if isinstance(value, tuple):
-        return [_sanitize_error_value(item, parent_key=parent_key) for item in value]
-    return value
-
-
-def _is_sensitive_key(key: str) -> bool:
-    lowered = key.lower()
-    return any(
-        token in lowered
-        for token in (
-            "key",
-            "token",
-            "secret",
-            "authorization",
-            "password",
-            "bearer",
-            "cookie",
-        )
     )
