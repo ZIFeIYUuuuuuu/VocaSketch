@@ -3,6 +3,7 @@ import type { PlaybackProcess, PlaybackProcessAction } from '../api/types';
 
 interface ProcessPlaybackPlayerProps {
   process: PlaybackProcess;
+  previewSrc?: string | null;
   finalSrc: string;
   elapsedMs: number;
   isLightMode: boolean;
@@ -23,10 +24,11 @@ const easeInOut = (value: number) => {
   return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 };
 
-export function ProcessPlaybackPlayer({ process, finalSrc, elapsedMs, isLightMode }: ProcessPlaybackPlayerProps) {
+export function ProcessPlaybackPlayer({ process, previewSrc, finalSrc, elapsedMs, isLightMode }: ProcessPlaybackPlayerProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const imageRef = useRef<HTMLImageElement | null>(null);
-  const [imageReady, setImageReady] = useState(false);
+  const finalImageRef = useRef<HTMLImageElement | null>(null);
+  const previewImageRef = useRef<HTMLImageElement | null>(null);
+  const [imagesReady, setImagesReady] = useState(false);
 
   const sortedActions = useMemo(
     () => [...process.actions].sort((left, right) => left.startMs - right.startMs),
@@ -42,23 +44,40 @@ export function ProcessPlaybackPlayer({ process, finalSrc, elapsedMs, isLightMod
     null;
 
   useEffect(() => {
-    setImageReady(false);
-    const image = new Image();
-    image.onload = () => {
-      imageRef.current = image;
-      setImageReady(true);
+    let cancelled = false;
+    setImagesReady(false);
+
+    const loadImage = (src: string | null | undefined) =>
+      new Promise<HTMLImageElement | null>((resolve) => {
+        if (!src) {
+          resolve(null);
+          return;
+        }
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => resolve(null);
+        image.src = src;
+      });
+
+    void Promise.all([loadImage(finalSrc), loadImage(previewSrc)]).then(([finalImage, previewImage]) => {
+      if (cancelled) {
+        return;
+      }
+      finalImageRef.current = finalImage;
+      previewImageRef.current = previewImage ?? finalImage;
+      setImagesReady(!!finalImage);
+    });
+
+    return () => {
+      cancelled = true;
     };
-    image.onerror = () => {
-      imageRef.current = null;
-      setImageReady(false);
-    };
-    image.src = finalSrc;
-  }, [finalSrc]);
+  }, [finalSrc, previewSrc]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    const image = imageRef.current;
-    if (!canvas || !imageReady || !image) {
+    const finalImage = finalImageRef.current;
+    const previewImage = previewImageRef.current ?? finalImage;
+    if (!canvas || !imagesReady || !finalImage || !previewImage) {
       return;
     }
 
@@ -78,19 +97,20 @@ export function ProcessPlaybackPlayer({ process, finalSrc, elapsedMs, isLightMod
     drawProcess(ctx, {
       actions: sortedActions,
       elapsedMs,
+      finalImage,
       height,
-      image,
+      previewImage,
       isLightMode,
       width,
     });
-  }, [elapsedMs, imageReady, isLightMode, sortedActions]);
+  }, [elapsedMs, imagesReady, isLightMode, sortedActions]);
 
   return (
     <div className={`relative aspect-[4/3] w-full overflow-hidden rounded-xl border ${isLightMode ? 'bg-white border-slate-200' : 'bg-[#090a10] border-[#1f2230]'}`}>
       <canvas ref={canvasRef} className="h-full w-full" aria-label="VocaSketch process playback canvas" />
-      {!imageReady && (
+      {!imagesReady && (
         <div className={`absolute inset-0 grid place-items-center text-[11px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
-          加载最终图像...
+          加载过程图像...
         </div>
       )}
       <div className={`pointer-events-none absolute left-3 top-3 rounded-lg border px-2.5 py-2 backdrop-blur ${isLightMode ? 'bg-white/82 border-slate-200 text-slate-700' : 'bg-slate-950/58 border-white/10 text-slate-200'}`}>
@@ -108,13 +128,14 @@ function drawProcess(
   input: {
     actions: PlaybackProcessAction[];
     elapsedMs: number;
+    finalImage: HTMLImageElement;
     height: number;
-    image: HTMLImageElement;
+    previewImage: HTMLImageElement;
     isLightMode: boolean;
     width: number;
   }
 ) {
-  const { actions, elapsedMs, height, image, isLightMode, width } = input;
+  const { actions, elapsedMs, finalImage, height, previewImage, isLightMode, width } = input;
   const maxDimension = Math.max(width, height);
   drawPaper(ctx, width, height, isLightMode);
 
@@ -128,19 +149,23 @@ function drawProcess(
     if (action.type === 'stroke') {
       drawStrokeAction(ctx, action, width, height, progress, cursor);
     } else if (action.type === 'fillRegion') {
-      drawFillAction(ctx, action, image, width, height, progress, cursor);
+      drawFillAction(ctx, action, resolveActionImage(action.sourceImage, previewImage, finalImage), width, height, progress, cursor);
     } else if (action.type === 'maskReveal') {
-      drawMaskRevealAction(ctx, action, image, width, height, progress, cursor);
+      drawMaskRevealAction(ctx, action, finalImage, width, height, progress, cursor);
     } else if (action.type === 'layerBadge') {
       drawLayerBadge(ctx, action, width, height, progress);
     } else if (action.type === 'finalReveal') {
-      drawFinalReveal(ctx, action, image, width, height, progress, cursor);
+      drawFinalReveal(ctx, action, finalImage, width, height, progress, cursor);
     } else if (action.type === 'eyeSpark') {
-      drawEyeSpark(ctx, action, image, width, height, progress, cursor);
+      drawEyeSpark(ctx, action, finalImage, width, height, progress, cursor);
     }
   }
 
   drawCursor(ctx, cursor, maxDimension, isLightMode);
+}
+
+function resolveActionImage(kind: 'preview' | 'final' | undefined, previewImage: HTMLImageElement, finalImage: HTMLImageElement) {
+  return kind === 'final' ? finalImage : previewImage;
 }
 
 function actionProgress(action: PlaybackProcessAction, elapsedMs: number) {
@@ -222,16 +247,18 @@ function drawFillAction(
   const centerY = action.center.y * height;
   const radiusX = action.radius.x * width * eased;
   const radiusY = action.radius.y * height * eased;
+  const imageAlpha = action.imageAlpha ?? action.opacity;
+  const tintAlpha = action.tintAlpha ?? 0.08;
 
   ctx.save();
   ctx.beginPath();
   ctx.ellipse(centerX, centerY, Math.max(2, radiusX), Math.max(2, radiusY), 0, 0, Math.PI * 2);
   ctx.clip();
-  ctx.filter = 'saturate(1.22) brightness(1.06) contrast(0.88)';
-  ctx.globalAlpha = action.opacity;
+  ctx.filter = resolveFillFilter(action.filterStyle);
+  ctx.globalAlpha = imageAlpha * (0.55 + eased * 0.45);
   drawImageCover(ctx, image, width, height);
   ctx.globalCompositeOperation = 'source-atop';
-  ctx.globalAlpha = 0.18 * eased;
+  ctx.globalAlpha = tintAlpha * eased;
   ctx.fillStyle = action.color;
   ctx.fillRect(0, 0, width, height);
   ctx.restore();
@@ -241,6 +268,16 @@ function drawFillAction(
   cursor.radius = Math.max(maxDimension * 0.035, Math.min(radiusX, radiusY) * 0.18);
   cursor.tool = action.tool;
   cursor.visible = progress < 1;
+}
+
+function resolveFillFilter(style: string | undefined) {
+  if (style === 'preview-flats') {
+    return 'saturate(0.82) brightness(1.05) contrast(0.86) blur(0.2px)';
+  }
+  if (style === 'final-flats') {
+    return 'saturate(1.08) brightness(1.02) contrast(0.9)';
+  }
+  return 'none';
 }
 
 function drawMaskRevealAction(

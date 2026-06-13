@@ -7,36 +7,44 @@ from typing import Any
 from ..models import AssetRecord, PlaybackManifest
 
 
-PROCESS_PLAYBACK_VERSION = "process-v2"
+PROCESS_PLAYBACK_VERSION = "process-v3"
 
 
 def enrich_manifest_with_process(
     manifest: PlaybackManifest,
     *,
+    preview_asset: AssetRecord | None = None,
     final_asset: AssetRecord | None,
+    preview_content_path: Path | None = None,
     final_content_path: Path | None = None,
 ) -> PlaybackManifest:
     if final_asset is None or not final_asset.contentUrl:
         return manifest
-    if manifest.process and manifest.process.get("version") == PROCESS_PLAYBACK_VERSION:
+    if _is_current_process(manifest.process, preview_asset=preview_asset):
         return manifest
 
-    width = final_asset.width or manifest.canvasSize.get("width") or 1024
-    height = final_asset.height or manifest.canvasSize.get("height") or 1024
+    width = final_asset.width or (preview_asset.width if preview_asset else None) or manifest.canvasSize.get("width") or 1024
+    height = final_asset.height or (preview_asset.height if preview_asset else None) or manifest.canvasSize.get("height") or 1024
     steps = _timeline_steps(width=width, height=height)
-    actions = _process_actions(steps, final_content_path=final_content_path)
+    actions = _process_actions(
+        steps,
+        preview_content_path=preview_content_path,
+        final_content_path=final_content_path,
+    )
     stroke_count = len([action for action in actions if action["type"] == "stroke"])
     process = {
         "version": PROCESS_PLAYBACK_VERSION,
         "style": "linedrawer-color-derived",
-        "renderer": "canvas-final-image-luma-strokes",
+        "renderer": "canvas-preview-guided-process",
         "source": {
+            "previewAssetId": preview_asset.assetId if preview_asset else None,
+            "previewContentUrl": preview_asset.contentUrl if preview_asset else None,
             "finalAssetId": final_asset.assetId,
             "finalContentUrl": final_asset.contentUrl,
             "mimeType": final_asset.mimeType,
             "width": width,
             "height": height,
-            "mode": "final-image-edge-color-process",
+            "mode": "preview-guided-final-refined-process" if preview_asset else "final-image-edge-color-process",
             "strokeCount": stroke_count,
         },
         "phases": [
@@ -52,12 +60,20 @@ def enrich_manifest_with_process(
         "actions": actions,
         "ui": {
             "cursor": True,
-            "layerBadges": ["Layer: Multiply", "Layer: Add / Glow", "Final: Eye Spark"],
+            "layerBadges": ["Layer: Multiply", "Layer: Add / Glow"],
             "rightRailSync": True,
         },
     }
     duration_ms = max(manifest.durationMs, steps[-1]["startMs"] + steps[-1]["durationMs"])
     return manifest.model_copy(update={"durationMs": duration_ms, "process": process})
+
+
+def _is_current_process(process: dict[str, Any] | None, *, preview_asset: AssetRecord | None) -> bool:
+    if not process:
+        return False
+    expected_mode = "preview-guided-final-refined-process" if preview_asset else "final-image-edge-color-process"
+    source = process.get("source") if isinstance(process.get("source"), dict) else {}
+    return process.get("version") == PROCESS_PLAYBACK_VERSION and source.get("mode") == expected_mode
 
 
 def _timeline_steps(*, width: int, height: int) -> list[dict[str, Any]]:
@@ -72,15 +88,24 @@ def _timeline_steps(*, width: int, height: int) -> list[dict[str, Any]]:
     ]
 
 
-def _process_actions(steps: list[dict[str, Any]], *, final_content_path: Path | None = None) -> list[dict[str, Any]]:
+def _process_actions(
+    steps: list[dict[str, Any]],
+    *,
+    preview_content_path: Path | None = None,
+    final_content_path: Path | None = None,
+) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
-    image_strokes = _image_derived_stroke_actions(final_content_path, steps=steps)
+    image_strokes = _image_derived_stroke_actions(
+        preview_content_path=preview_content_path,
+        final_content_path=final_content_path,
+        steps=steps,
+    )
     if image_strokes:
         actions.extend(image_strokes)
     else:
         actions.extend(_template_stroke_actions(_step(steps, "sketch"), prefix="sketch", color="#7b8794", width=0.006, opacity=0.54))
         actions.extend(_template_stroke_actions(_step(steps, "lineart"), prefix="lineart", color="#111827", width=0.0045, opacity=0.9))
-    actions.extend(_fill_actions(_step(steps, "flat_color")))
+    actions.extend(_fill_actions(_step(steps, "flat_color"), source_image="preview" if preview_content_path else "final"))
     actions.extend(_mask_actions(_step(steps, "shadow"), role="shadow", blend_mode="multiply", badge="Layer: Multiply"))
     actions.extend(_mask_actions(_step(steps, "lighting"), role="lighting", blend_mode="screen", badge="Layer: Add / Glow"))
     actions.extend(_finish_actions(_step(steps, "details")))
@@ -94,41 +119,52 @@ def _step(steps: list[dict[str, Any]], role: str) -> dict[str, Any]:
     raise ValueError(f"missing process step: {role}")
 
 
-def _image_derived_stroke_actions(final_content_path: Path | None, *, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if final_content_path is None:
+def _image_derived_stroke_actions(
+    *,
+    preview_content_path: Path | None,
+    final_content_path: Path | None,
+    steps: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if preview_content_path is None and final_content_path is None:
         return []
 
-    contours = _extract_normalized_contours(final_content_path)
-    if not contours:
+    sketch_source = preview_content_path or final_content_path
+    lineart_source = final_content_path or preview_content_path
+    if sketch_source is None or lineart_source is None:
+        return []
+
+    sketch_contours = _extract_normalized_contours(sketch_source, variant="sketch")
+    lineart_contours = _extract_normalized_contours(lineart_source, variant="lineart")
+    if not sketch_contours and not lineart_contours:
         return []
 
     sketch_step = _step(steps, "sketch")
     lineart_step = _step(steps, "lineart")
-    sketch_contours = contours[: min(70, len(contours))]
-    lineart_contours = contours[: min(130, len(contours))]
     return [
         *_contours_to_stroke_actions(
-            sketch_contours,
+            sketch_contours[: min(28, len(sketch_contours))],
             step=sketch_step,
             prefix="sketch-edge",
             color="#8b96a6",
-            stroke_width=0.0028,
-            opacity=0.48,
+            stroke_width=0.0024,
+            opacity=0.34,
             tool="pencil",
+            source="preview-image-contour" if preview_content_path else "final-image-contour",
         ),
         *_contours_to_stroke_actions(
-            lineart_contours,
+            lineart_contours[: min(54, len(lineart_contours))],
             step=lineart_step,
             prefix="lineart-edge",
             color="#101318",
-            stroke_width=0.0022,
-            opacity=0.92,
+            stroke_width=0.0019,
+            opacity=0.84,
             tool="inking-pen",
+            source="final-image-contour" if final_content_path else "preview-image-contour",
         ),
     ]
 
 
-def _extract_normalized_contours(final_content_path: Path) -> list[list[tuple[float, float]]]:
+def _extract_normalized_contours(image_path: Path, *, variant: str = "lineart") -> list[list[tuple[float, float]]]:
     try:
         import cv2  # type: ignore[import-not-found]
         import numpy as np  # type: ignore[import-not-found]
@@ -137,7 +173,7 @@ def _extract_normalized_contours(final_content_path: Path) -> list[list[tuple[fl
         return []
 
     try:
-        with Image.open(final_content_path) as image:
+        with Image.open(image_path) as image:
             rgb = image.convert("RGB")
             cropped = _center_crop_to_square(rgb)
             resized = cropped.resize((512, 512))
@@ -146,34 +182,90 @@ def _extract_normalized_contours(final_content_path: Path) -> list[list[tuple[fl
         return []
 
     gray = cv2.cvtColor(array, cv2.COLOR_RGB2GRAY)
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-    edges = cv2.Canny(gray, 48, 132)
+    blur_kernel = (5, 5) if variant == "sketch" else (3, 3)
+    gray = cv2.GaussianBlur(gray, blur_kernel, 0)
+    low_threshold = 76 if variant == "sketch" else 52
+    high_threshold = 180 if variant == "sketch" else 148
+    edges = cv2.Canny(gray, low_threshold, high_threshold)
     edges = cv2.dilate(edges, np.ones((2, 2), dtype=np.uint8), iterations=1)
+    if variant == "sketch":
+        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8), iterations=1)
+    edges = cv2.bitwise_and(edges, _subject_focus_mask(np, variant=variant))
     found = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
     contours = found[0] if len(found) == 2 else found[1]
 
     normalized: list[list[tuple[float, float]]] = []
     for contour in contours:
         arc_length = cv2.arcLength(contour, closed=False)
-        if arc_length < 14:
+        min_arc_length = 28 if variant == "sketch" else 20
+        if arc_length < min_arc_length:
             continue
-        epsilon = max(1.2, arc_length * 0.006)
+        epsilon = max(1.5 if variant == "sketch" else 1.2, arc_length * (0.012 if variant == "sketch" else 0.006))
         approx = cv2.approxPolyDP(contour, epsilon, closed=False)
         points = [(float(point[0][0]) / 512.0, float(point[0][1]) / 512.0) for point in approx]
-        points = _simplify_points(points, max_points=18)
-        if len(points) >= 2:
+        points = _simplify_points(points, max_points=10 if variant == "sketch" else 18)
+        if len(points) >= 2 and _is_subject_contour(points, variant=variant):
             normalized.append(points)
 
-    def contour_key(points: list[tuple[float, float]]) -> tuple[float, float, float]:
+    def contour_key(points: list[tuple[float, float]]) -> tuple[float, float, float, float]:
         length = _polyline_length(points)
         center_y = sum(point[1] for point in points) / len(points)
         center_x = sum(point[0] for point in points) / len(points)
-        # Long expressive strokes first, then top-to-bottom spatial scan.
-        tier = 0 if length > 0.17 else 1 if length > 0.07 else 2
-        return (tier, center_y, center_x)
+        focus = abs(center_x - 0.54) + abs(center_y - 0.54)
+        # Prefer long, subject-centric strokes before smaller details.
+        tier = 0 if length > 0.14 else 1 if length > 0.075 else 2
+        return (tier, focus, center_y, center_x)
 
     normalized.sort(key=contour_key)
-    return normalized[:160]
+    return normalized[: 34 if variant == "sketch" else 72]
+
+
+def _subject_focus_mask(np: Any, *, variant: str = "lineart") -> Any:
+    mask = np.zeros((512, 512), dtype=np.uint8)
+    ellipses = (
+        [
+            (0.52, 0.28, 0.17, 0.16),
+            (0.53, 0.56, 0.23, 0.34),
+            (0.58, 0.48, 0.10, 0.09),
+        ]
+        if variant == "sketch"
+        else [
+            (0.53, 0.28, 0.20, 0.18),
+            (0.54, 0.56, 0.28, 0.38),
+            (0.59, 0.48, 0.12, 0.10),
+        ]
+    )
+    yy, xx = np.ogrid[:512, :512]
+    for center_x, center_y, radius_x, radius_y in ellipses:
+        normalized = (((xx / 512.0) - center_x) / radius_x) ** 2 + (((yy / 512.0) - center_y) / radius_y) ** 2
+        mask[normalized <= 1.0] = 255
+    return mask
+
+
+def _is_subject_contour(points: list[tuple[float, float]], *, variant: str = "lineart") -> bool:
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    min_x = min(xs)
+    max_x = max(xs)
+    min_y = min(ys)
+    max_y = max(ys)
+    width = max_x - min_x
+    height = max_y - min_y
+    center_x = sum(xs) / len(xs)
+    center_y = sum(ys) / len(ys)
+    length = _polyline_length(points)
+
+    if min_x < 0.03 or min_y < 0.03 or max_x > 0.97 or max_y > 0.97:
+        return False
+    if width > 0.72 or height > 0.72:
+        return False
+    if length < (0.048 if variant == "sketch" else 0.03):
+        return False
+    if center_x < 0.18 or center_x > 0.9 or center_y < 0.08 or center_y > 0.96:
+        return False
+    if variant == "sketch" and (center_x < 0.28 or center_x > 0.82 or center_y < 0.14 or center_y > 0.88):
+        return False
+    return True
 
 
 def _center_crop_to_square(image: Any) -> Any:
@@ -204,6 +296,7 @@ def _contours_to_stroke_actions(
     stroke_width: float,
     opacity: float,
     tool: str,
+    source: str = "final-image-contour",
 ) -> list[dict[str, Any]]:
     if not contours:
         return []
@@ -229,7 +322,7 @@ def _contours_to_stroke_actions(
                 "color": color,
                 "opacity": opacity,
                 "speedProfile": "long-fast-short-slow" if length > 0.17 else "detail-slow",
-                "source": "final-image-contour",
+                "source": source,
             }
         )
     return actions
@@ -269,29 +362,35 @@ def _template_stroke_actions(step: dict[str, Any], *, prefix: str, color: str, w
     return actions
 
 
-def _fill_actions(step: dict[str, Any]) -> list[dict[str, Any]]:
+def _fill_actions(step: dict[str, Any], *, source_image: str) -> list[dict[str, Any]]:
     regions = [
-        ("hair-base", 0.47, 0.32, 0.43, 0.34, "#6fb7df", 0.78),
-        ("face-base", 0.48, 0.47, 0.24, 0.20, "#ffd9cf", 0.72),
-        ("coat-base", 0.50, 0.75, 0.52, 0.30, "#334155", 0.66),
-        ("accent-base", 0.57, 0.58, 0.18, 0.16, "#f6a3bc", 0.56),
+        ("hair-left", 0.43, 0.28, 0.12, 0.11, "#8cc8e7", 0.42, 0.40, 0.08),
+        ("hair-right", 0.58, 0.30, 0.11, 0.10, "#71b4e0", 0.4, 0.40, 0.08),
+        ("face-base", 0.50, 0.41, 0.085, 0.075, "#ffd9cf", 0.36, 0.34, 0.05),
+        ("upper-cloak", 0.55, 0.54, 0.14, 0.13, "#51658d", 0.38, 0.44, 0.08),
+        ("dress-core", 0.54, 0.70, 0.17, 0.16, "#38517f", 0.42, 0.48, 0.08),
+        ("accent-ribbon", 0.63, 0.60, 0.08, 0.065, "#f2a7c4", 0.32, 0.42, 0.06),
     ]
     actions: list[dict[str, Any]] = []
-    for index, (name, x, y, rx, ry, color, opacity) in enumerate(regions):
+    for index, (name, x, y, rx, ry, color, opacity, image_alpha, tint_alpha) in enumerate(regions):
         actions.append(
             {
                 "id": f"flat-fill-{name}",
                 "type": "fillRegion",
                 "phase": step["role"],
                 "label": step["label"],
-                "startMs": int(step["startMs"] + index * 410),
-                "durationMs": 1050,
+                "startMs": int(step["startMs"] + index * 290),
+                "durationMs": 760,
                 "tool": "soft-brush",
                 "center": {"x": x, "y": y},
                 "radius": {"x": rx, "y": ry},
                 "color": color,
                 "opacity": opacity,
-                "edgeFeather": 0.18,
+                "sourceImage": source_image,
+                "imageAlpha": image_alpha,
+                "tintAlpha": tint_alpha,
+                "filterStyle": "preview-flats" if source_image == "preview" else "final-flats",
+                "edgeFeather": 0.22,
                 "reveal": "center-out",
             }
         )
@@ -333,19 +432,7 @@ def _finish_actions(step: dict[str, Any]) -> list[dict[str, Any]]:
             "phase": step["role"],
             "label": step["label"],
             "startMs": step["startMs"],
-            "durationMs": 1100,
+            "durationMs": 1450,
             "tool": "detail-brush",
-        },
-        {
-            "id": "details-eye-spark-left",
-            "type": "eyeSpark",
-            "phase": step["role"],
-            "label": "Final: Eye Spark",
-            "startMs": int(step["startMs"] + 1180),
-            "durationMs": 520,
-            "tool": "highlight-pen",
-            "points": [{"x": 0.43, "y": 0.45}, {"x": 0.57, "y": 0.45}],
-            "color": "#ffffff",
-            "opacity": 0.95,
         },
     ]

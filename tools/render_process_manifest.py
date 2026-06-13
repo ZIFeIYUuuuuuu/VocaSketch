@@ -8,7 +8,7 @@ from typing import Any
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 
 def main() -> None:
@@ -24,30 +24,64 @@ def main() -> None:
     data_dir = Path(args.data_dir)
     job = json.loads((data_dir / "jobs" / f"{args.job}.json").read_text(encoding="utf-8"))
     process = job["playbackManifest"]["process"]
+    preview = load_optional_asset_image(data_dir, job.get("previewAssetId"))
     final_asset = json.loads((data_dir / "assets" / f"{job['finalAssetId']}.json").read_text(encoding="utf-8"))
     final_path = data_dir / "assets" / final_asset["storagePath"]
     final = Image.open(final_path).convert("RGB")
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    render_process(process, final, output_path, fps=args.fps, width=args.width, height=args.height)
+    render_process(process, final, output_path, fps=args.fps, width=args.width, height=args.height, preview=preview)
     print(output_path)
 
 
-def render_process(process: dict[str, Any], final: Image.Image, output_path: Path, *, fps: int, width: int, height: int) -> None:
+def load_optional_asset_image(data_dir: Path, asset_id: str | None) -> Image.Image | None:
+    if not asset_id:
+        return None
+    try:
+        asset = json.loads((data_dir / "assets" / f"{asset_id}.json").read_text(encoding="utf-8"))
+        storage_path = asset.get("storagePath")
+        if not storage_path:
+            return None
+        asset_path = data_dir / "assets" / storage_path
+        if not asset_path.is_file():
+            return None
+        return Image.open(asset_path).convert("RGB")
+    except (OSError, json.JSONDecodeError, KeyError):
+        return None
+
+
+def render_process(
+    process: dict[str, Any],
+    final: Image.Image,
+    output_path: Path,
+    *,
+    fps: int,
+    width: int,
+    height: int,
+    preview: Image.Image | None = None,
+) -> None:
     duration_ms = max(action["startMs"] + action["durationMs"] for action in process["actions"])
     frame_count = int(math.ceil(duration_ms / 1000 * fps))
+    preview_cover = cover_image(preview or final, width, height)
     final_cover = cover_image(final, width, height)
 
     writer = cv2.VideoWriter(str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
     for frame_index in range(frame_count + 1):
         elapsed_ms = int(frame_index * 1000 / fps)
-        frame = draw_process_frame(process, final_cover, elapsed_ms, width, height)
+        frame = draw_process_frame(process, preview_cover, final_cover, elapsed_ms, width, height)
         writer.write(cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR))
     writer.release()
 
 
-def draw_process_frame(process: dict[str, Any], final_cover: Image.Image, elapsed_ms: int, width: int, height: int) -> Image.Image:
+def draw_process_frame(
+    process: dict[str, Any],
+    preview_cover: Image.Image,
+    final_cover: Image.Image,
+    elapsed_ms: int,
+    width: int,
+    height: int,
+) -> Image.Image:
     frame = Image.new("RGB", (width, height), (255, 250, 243))
     draw = ImageDraw.Draw(frame, "RGBA")
     cursor: dict[str, Any] = {"visible": False, "x": width * 0.5, "y": height * 0.5, "radius": 12, "tool": "idle"}
@@ -59,7 +93,8 @@ def draw_process_frame(process: dict[str, Any], final_cover: Image.Image, elapse
         if action["type"] == "stroke":
             draw_stroke(draw, action, progress, width, height, cursor)
         elif action["type"] == "fillRegion":
-            draw_fill(frame, final_cover, action, progress, width, height, cursor)
+            source_image = final_cover if action.get("sourceImage") == "final" else preview_cover
+            draw_fill(frame, source_image, action, progress, width, height, cursor)
         elif action["type"] == "maskReveal":
             draw_mask(frame, final_cover, action, progress, width, height, cursor)
         elif action["type"] == "layerBadge":
@@ -93,8 +128,15 @@ def draw_fill(frame: Image.Image, final_cover: Image.Image, action: dict[str, An
     mask_draw = ImageDraw.Draw(mask)
     cx, cy = action["center"]["x"] * width, action["center"]["y"] * height
     rx, ry = action["radius"]["x"] * width * eased, action["radius"]["y"] * height * eased
-    mask_draw.ellipse((cx - rx, cy - ry, cx + rx, cy + ry), fill=int(255 * action["opacity"]))
-    frame.paste(final_cover, mask=mask.filter(ImageFilter.GaussianBlur(max(1, int(min(width, height) * 0.012)))))
+    mask_draw.ellipse((cx - rx, cy - ry, cx + rx, cy + ry), fill=int(255 * (action.get("imageAlpha") or action["opacity"]) * (0.55 + eased * 0.45)))
+    filtered = apply_fill_filter(final_cover, action.get("filterStyle"))
+    blurred_mask = mask.filter(ImageFilter.GaussianBlur(max(1, int(min(width, height) * 0.012))))
+    frame.paste(filtered, mask=blurred_mask)
+    tint_alpha = action.get("tintAlpha") or 0.08
+    tint = Image.new("RGB", (width, height), hex_to_rgb(action["color"]))
+    tint_mask = Image.new("L", (width, height), int(255 * tint_alpha * eased))
+    tint_mask = ImageChops.multiply(tint_mask, blurred_mask)
+    frame.paste(tint, mask=tint_mask)
     cursor.update({"visible": progress < 1, "x": cx + rx * 0.34, "y": cy - ry * 0.18, "radius": max(18, min(rx, ry) * 0.18), "tool": action["tool"]})
 
 
@@ -190,6 +232,19 @@ def ease_in_out(value: float) -> float:
 def hex_to_rgba(value: str, opacity: float) -> tuple[int, int, int, int]:
     value = value.lstrip("#")
     return (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16), int(255 * opacity))
+
+
+def hex_to_rgb(value: str) -> tuple[int, int, int]:
+    value = value.lstrip("#")
+    return (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16))
+
+
+def apply_fill_filter(image: Image.Image, style: str | None) -> Image.Image:
+    if style == "preview-flats":
+        return image.filter(ImageFilter.GaussianBlur(1.1))
+    if style == "final-flats":
+        return image.filter(ImageFilter.GaussianBlur(0.4))
+    return image
 
 
 def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:

@@ -280,6 +280,10 @@ export type PlaybackProcessAction =
       radius: { x: number; y: number };
       color: string;
       opacity: number;
+      sourceImage?: 'preview' | 'final';
+      imageAlpha?: number;
+      tintAlpha?: number;
+      filterStyle?: string;
       edgeFeather?: number;
       reveal?: string;
     }
@@ -340,6 +344,8 @@ export interface PlaybackProcess {
   style: string;
   renderer: string;
   source: {
+    previewAssetId?: string | null;
+    previewContentUrl?: string | null;
     finalAssetId: string;
     finalContentUrl: string;
     mimeType: string;

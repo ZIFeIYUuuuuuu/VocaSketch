@@ -137,6 +137,7 @@ export default function App() {
   const [redoCount, setRedoCount] = useState<number>(0);
   const [v2PromptText, setV2PromptText] = useState<string>('');
   const [v2Job, setV2Job] = useState<DrawingJob | null>(null);
+  const [v2PreviewAsset, setV2PreviewAsset] = useState<AssetRecord | null>(null);
   const [v2FinalAsset, setV2FinalAsset] = useState<AssetRecord | null>(null);
   const [v2PlaybackManifestAsset, setV2PlaybackManifestAsset] = useState<AssetRecord | null>(null);
   const [v2LastEventType, setV2LastEventType] = useState<JobEvent['type'] | null>(null);
@@ -385,11 +386,13 @@ export default function App() {
   };
 
   const loadV2AssetSet = async (job: DrawingJob) => {
-    const [finalAsset, manifestAsset] = await Promise.all([
+    const [previewAsset, finalAsset, manifestAsset] = await Promise.all([
+      job.previewAssetId ? getAssetMetadata(job.previewAssetId).catch(() => null) : Promise.resolve(null),
       job.finalAssetId ? getAssetMetadata(job.finalAssetId).catch(() => null) : Promise.resolve(null),
       job.playbackManifestAssetId ? getAssetMetadata(job.playbackManifestAssetId).catch(() => null) : Promise.resolve(null)
     ]);
 
+    setV2PreviewAsset(previewAsset);
     setV2FinalAsset(finalAsset);
     setV2PlaybackManifestAsset(manifestAsset);
   };
@@ -2480,6 +2483,11 @@ export default function App() {
     r.start();
   };
 
+  const v2PreviewSrc = v2PreviewAsset
+    ? buildAssetContentUrl(v2PreviewAsset)
+    : v2Job?.previewAssetId
+      ? buildAssetContentUrl(v2Job.previewAssetId)
+      : null;
   const v2FinalSrc = v2FinalAsset
     ? buildAssetContentUrl(v2FinalAsset)
     : v2Job?.finalAssetId
@@ -2778,6 +2786,7 @@ export default function App() {
                   {v2HasProcessPlayback && v2PlaybackProcess && v2FinalSrc ? (
                     <ProcessPlaybackPlayer
                       process={v2PlaybackProcess}
+                      previewSrc={v2PreviewSrc}
                       finalSrc={v2FinalSrc}
                       elapsedMs={v2PlaybackElapsedMs}
                       isLightMode={isLightMode}

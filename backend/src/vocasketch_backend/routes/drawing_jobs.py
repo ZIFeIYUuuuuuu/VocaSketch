@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Query, Request, status
 from fastapi.responses import StreamingResponse
 
+from ..assets.asset_store import AssetContentMissingError
 from ..errors import api_error, redact_text, sanitize_error_payload
 from ..job_store import InvalidIdentifierError
 from ..models import (
@@ -20,6 +21,7 @@ from ..models import (
     JobErrorSummary,
     JobStatus,
 )
+from ..providers.process_playback import enrich_manifest_with_process
 from ..workflow import WorkflowStateError
 
 router = APIRouter(prefix="/api/v2/drawing-jobs", tags=["drawing-jobs"])
@@ -107,6 +109,7 @@ async def get_drawing_job(job_id: str, request: Request) -> DrawingJobResponse:
             message="drawing job not found",
             details={"jobId": job_id},
         )
+    job = await _maybe_refresh_playback_process(request, job)
     return _to_response(job)
 
 
@@ -267,6 +270,57 @@ def _to_response(job: DrawingJob) -> DrawingJobResponse:
         payload["error"] = sanitize_error_payload(payload["error"])
     payload["eventsUrl"] = f"/api/v2/drawing-jobs/{job.jobId}/events"
     return DrawingJobResponse.model_validate(payload)
+
+
+async def _maybe_refresh_playback_process(request: Request, job: DrawingJob) -> DrawingJob:
+    if job.playbackManifest is None or not job.finalAssetId:
+        return job
+
+    asset_store = request.app.state.asset_store
+    final_asset = await asset_store.get_asset(job.finalAssetId)
+    if final_asset is None:
+        return job
+
+    preview_asset = None
+    if job.previewAssetId:
+        preview_asset = await asset_store.get_asset(job.previewAssetId)
+
+    final_content_path = await _optional_asset_content_path(asset_store, job.finalAssetId)
+    preview_content_path = (
+        await _optional_asset_content_path(asset_store, job.previewAssetId)
+        if job.previewAssetId
+        else None
+    )
+
+    refreshed = enrich_manifest_with_process(
+        job.playbackManifest,
+        preview_asset=preview_asset,
+        final_asset=final_asset,
+        preview_content_path=preview_content_path,
+        final_content_path=final_content_path,
+    )
+    if refreshed is job.playbackManifest:
+        return job
+
+    manifest_asset = await asset_store.save_playback_manifest(job.jobId, refreshed)
+    updated_job = job.model_copy(
+        update={
+            "playbackManifest": refreshed,
+            "playbackManifestAssetId": manifest_asset.assetId,
+        }
+    )
+    await request.app.state.job_store.save_job(updated_job)
+    return updated_job
+
+
+async def _optional_asset_content_path(asset_store, asset_id: str | None):
+    if not asset_id:
+        return None
+    try:
+        handle = await asset_store.get_asset_content(asset_id)
+    except (AssetContentMissingError, InvalidIdentifierError):
+        return None
+    return handle.absolute_path if handle else None
 
 
 def _parse_event_after_seq(*, after_seq: str | None, since_seq: str | None) -> int:

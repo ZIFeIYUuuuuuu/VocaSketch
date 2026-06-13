@@ -90,13 +90,19 @@ async def build_playback_manifest_node(
 ) -> DrawingWorkflowState:
     try:
         playback_manifest = await provider.build_playback_manifest(state)
+        preview_content_path = None
+        if state.previewAsset is not None and state.previewAsset.storagePath:
+            preview_content = await asset_store.get_asset_content(state.previewAsset.assetId)
+            preview_content_path = preview_content.absolute_path if preview_content else None
         final_content_path = None
         if state.finalAsset is not None and state.finalAsset.storagePath:
             final_content = await asset_store.get_asset_content(state.finalAsset.assetId)
             final_content_path = final_content.absolute_path if final_content else None
         playback_manifest = enrich_manifest_with_process(
             playback_manifest,
+            preview_asset=state.previewAsset,
             final_asset=state.finalAsset,
+            preview_content_path=preview_content_path,
             final_content_path=final_content_path,
         )
         manifest_asset = await asset_store.save_playback_manifest(state.jobId, playback_manifest)
