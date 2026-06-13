@@ -77,6 +77,8 @@ const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4000/a
 const drawingApiBaseUrl = getV2ApiBaseUrl();
 const SESSION_STORAGE_KEY = 'vocasketch.sessionId';
 const PROJECT_STORAGE_KEY = 'vocasketch.projectId';
+const V2_JOB_STORAGE_KEY = 'vocasketch.v2JobId';
+const V2_EVENT_SEQ_STORAGE_KEY = 'vocasketch.v2LastEventSeq';
 const AUTO_RECORD_MAX_MS = 6500;
 const AUTO_RECORD_MIN_MS = 900;
 const SILENCE_AFTER_SPEECH_MS = 950;
@@ -141,6 +143,7 @@ export default function App() {
   const [v2EventLog, setV2EventLog] = useState<JobEvent[]>([]);
   const [v2FlowMessage, setV2FlowMessage] = useState<string>('等待创建 v2 drawing job');
   const [v2UiError, setV2UiError] = useState<string | null>(null);
+  const [v2UiErrorDiagnostic, setV2UiErrorDiagnostic] = useState<string | null>(null);
   const [v2RecentJobs, setV2RecentJobs] = useState<DrawingJobSummary[]>([]);
   const [v2RecentJobsError, setV2RecentJobsError] = useState<string | null>(null);
   const [isV2RecentJobsLoading, setIsV2RecentJobsLoading] = useState<boolean>(false);
@@ -151,6 +154,7 @@ export default function App() {
   const [isV2Confirming, setIsV2Confirming] = useState<boolean>(false);
   const [isV2Retrying, setIsV2Retrying] = useState<boolean>(false);
   const [isV2Cancelling, setIsV2Cancelling] = useState<boolean>(false);
+  const isV2ActionBusy = isV2Submitting || isV2Confirming || isV2Retrying || isV2Cancelling;
   const [isV2PlaybackRunning, setIsV2PlaybackRunning] = useState<boolean>(false);
   const [v2PlaybackElapsedMs, setV2PlaybackElapsedMs] = useState<number>(0);
   const [v2PlaybackSessionNonce, setV2PlaybackSessionNonce] = useState<number>(0);
@@ -198,6 +202,8 @@ export default function App() {
   const v2SubscriptionRef = useRef<{ close: () => void } | null>(null);
   const v2PollTimerRef = useRef<number | null>(null);
   const v2ActiveJobIdRef = useRef<string | null>(null);
+  const v2LastEventSeqRef = useRef<number>(0);
+  const v2RestoreStartedRef = useRef<boolean>(false);
   const v2PlaybackRafRef = useRef<number | null>(null);
   const v2PlaybackStartedAtRef = useRef<number | null>(null);
   const v2PlaybackBaseElapsedRef = useRef<number>(0);
@@ -277,9 +283,71 @@ export default function App() {
     stopV2Polling();
     stopV2PlaybackLoop();
     v2ActiveJobIdRef.current = null;
+    v2LastEventSeqRef.current = 0;
   };
 
   const isTerminalV2Status = (status?: JobStatus | null) => !!status && V2_TERMINAL_STATUSES.includes(status);
+
+  const clearV2UiError = () => {
+    setV2UiError(null);
+    setV2UiErrorDiagnostic(null);
+  };
+
+  const setV2ErrorFromUnknown = (error: unknown, fallbackMessage: string) => {
+    const apiError = error as Error & {
+      status?: number;
+      code?: string;
+      retryable?: boolean;
+    };
+    setV2UiError(error instanceof Error ? error.message : fallbackMessage);
+
+    const fragments: string[] = [];
+    if (apiError.status) {
+      fragments.push(`status ${apiError.status}`);
+    }
+    if (apiError.code) {
+      fragments.push(apiError.code);
+    }
+    if (typeof apiError.retryable === 'boolean') {
+      fragments.push(`retryable ${apiError.retryable ? 'yes' : 'no'}`);
+    }
+    setV2UiErrorDiagnostic(fragments.length > 0 ? fragments.join(' · ') : null);
+  };
+
+  const persistV2CurrentJob = (jobId: string) => {
+    localStorage.setItem(V2_JOB_STORAGE_KEY, jobId);
+  };
+
+  const clearPersistedV2EventSeq = () => {
+    localStorage.removeItem(V2_EVENT_SEQ_STORAGE_KEY);
+    v2LastEventSeqRef.current = 0;
+  };
+
+  const clearPersistedV2Job = () => {
+    localStorage.removeItem(V2_JOB_STORAGE_KEY);
+    clearPersistedV2EventSeq();
+  };
+
+  const readPersistedV2JobId = () => {
+    return localStorage.getItem(V2_JOB_STORAGE_KEY)?.trim() || null;
+  };
+
+  const readPersistedV2EventSeq = () => {
+    const rawValue = localStorage.getItem(V2_EVENT_SEQ_STORAGE_KEY);
+    if (!rawValue) {
+      return 0;
+    }
+    const parsed = Number.parseInt(rawValue, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  };
+
+  const persistV2EventSeq = (seq: number) => {
+    if (!Number.isFinite(seq) || seq <= v2LastEventSeqRef.current) {
+      return;
+    }
+    v2LastEventSeqRef.current = seq;
+    localStorage.setItem(V2_EVENT_SEQ_STORAGE_KEY, String(seq));
+  };
 
   const refreshV2RecentJobs = async (options: { silent?: boolean } = {}) => {
     if (!options.silent) {
@@ -349,7 +417,8 @@ export default function App() {
     }
 
     setV2Job(job);
-    setV2UiError(null);
+    persistV2CurrentJob(job.jobId);
+    clearV2UiError();
     setV2FlowMessage(describeV2Status(job));
     await loadV2AssetSet(job);
 
@@ -373,10 +442,20 @@ export default function App() {
     }, 1500);
   };
 
-  const trackV2Job = (jobId: string) => {
+  const trackV2Job = (jobId: string, options: { afterSeq?: number } = {}) => {
+    const resumeAfterSeq = Math.max(0, Math.floor(options.afterSeq ?? v2LastEventSeqRef.current));
     resetV2Tracking();
     v2ActiveJobIdRef.current = jobId;
+    v2LastEventSeqRef.current = resumeAfterSeq;
+    persistV2CurrentJob(jobId);
+    if (resumeAfterSeq > 0) {
+      localStorage.setItem(V2_EVENT_SEQ_STORAGE_KEY, String(resumeAfterSeq));
+    } else {
+      localStorage.removeItem(V2_EVENT_SEQ_STORAGE_KEY);
+    }
+
     const subscription = subscribeDrawingJobEvents(jobId, {
+      afterSeq: resumeAfterSeq,
       onOpen: () => {
         if (v2ActiveJobIdRef.current === jobId) {
           setV2FlowMessage('已连接 drawing job 事件流。');
@@ -386,6 +465,7 @@ export default function App() {
         if (v2ActiveJobIdRef.current !== jobId) {
           return;
         }
+        persistV2EventSeq(event.seq);
         setV2LastEventType(event.type);
         setV2EventLog((prev) => [event, ...prev].slice(0, 14));
         void refreshV2JobSnapshot(jobId).catch((error) => {
@@ -588,21 +668,26 @@ export default function App() {
     const transcript = userSpeechSub.trim();
     if (!transcript) {
       setV2UiError('当前还没有可复用的语音转写文本。');
+      setV2UiErrorDiagnostic(null);
       return;
     }
-    setV2UiError(null);
+    clearV2UiError();
     setV2PromptText(transcript);
   };
 
   const handleStartV2DrawingJob = async () => {
     const prompt = v2PromptText.trim();
+    if (isV2ActionBusy) {
+      return;
+    }
     if (!prompt) {
       setV2UiError('请先输入或填入一段用于 v2 生成的描述文本。');
+      setV2UiErrorDiagnostic(null);
       return;
     }
 
     setIsV2Submitting(true);
-    setV2UiError(null);
+    clearV2UiError();
     setV2Job(null);
     setV2PreviewAsset(null);
     setV2FinalAsset(null);
@@ -612,6 +697,7 @@ export default function App() {
     setV2FlowMessage('正在创建 drawing job...');
     resetV2Tracking();
     resetV2Playback();
+    clearPersistedV2EventSeq();
 
     try {
       const created = await createDrawingJob(prompt, {
@@ -621,6 +707,7 @@ export default function App() {
         qualityProfile: 'high'
       });
 
+      persistV2CurrentJob(created.jobId);
       v2ActiveJobIdRef.current = created.jobId;
       await refreshV2JobSnapshot(created.jobId);
       trackV2Job(created.jobId);
@@ -628,7 +715,7 @@ export default function App() {
       pushLog('system', `V2 drawing job 已创建：${created.jobId}`);
     } catch (error) {
       console.error('Creating v2 drawing job failed.', error);
-      setV2UiError(error instanceof Error ? error.message : '创建 v2 drawing job 失败。');
+      setV2ErrorFromUnknown(error, '创建 v2 drawing job 失败。');
       setV2FlowMessage('未能创建 drawing job。');
     } finally {
       setIsV2Submitting(false);
@@ -636,12 +723,12 @@ export default function App() {
   };
 
   const handleConfirmV2DrawingJob = async () => {
-    if (!v2Job || v2Job.status !== 'preview_ready' || !v2Job.requiresConfirmation || isV2Confirming || isV2Cancelling) {
+    if (!v2Job || v2Job.status !== 'preview_ready' || !v2Job.requiresConfirmation || isV2ActionBusy) {
       return;
     }
 
     setIsV2Confirming(true);
-    setV2UiError(null);
+    clearV2UiError();
     try {
       const confirmed = await confirmDrawingJob(v2Job.jobId, {
         notes: 'frontend-stage7-confirm'
@@ -652,19 +739,19 @@ export default function App() {
       trackV2Job(confirmed.jobId);
     } catch (error) {
       console.error('Confirming v2 drawing job failed.', error);
-      setV2UiError(error instanceof Error ? error.message : '确认 v2 drawing job 失败。');
+      setV2ErrorFromUnknown(error, '确认 v2 drawing job 失败。');
     } finally {
       setIsV2Confirming(false);
     }
   };
 
   const handleRetryV2DrawingJob = async () => {
-    if (!v2Job || v2Job.status !== 'failed' || !v2Job.error?.retryable || isV2Retrying) {
+    if (!v2Job || v2Job.status !== 'failed' || !v2Job.error?.retryable || isV2ActionBusy) {
       return;
     }
 
     setIsV2Retrying(true);
-    setV2UiError(null);
+    clearV2UiError();
     try {
       const retried = await retryDrawingJob(v2Job.jobId, {
         fromPhase: v2Job.error?.phase,
@@ -676,6 +763,8 @@ export default function App() {
       setV2LastEventType(null);
       setV2EventLog([]);
       resetV2Playback();
+      clearPersistedV2EventSeq();
+      persistV2CurrentJob(retried.jobId);
       v2ActiveJobIdRef.current = retried.jobId;
       await refreshV2JobSnapshot(retried.jobId);
       trackV2Job(retried.jobId);
@@ -683,30 +772,31 @@ export default function App() {
       setV2FlowMessage(`已创建新的重试任务：${retried.jobId}，来源任务：${retried.retryOfJobId}。`);
     } catch (error) {
       console.error('Retrying v2 drawing job failed.', error);
-      setV2UiError(error instanceof Error ? error.message : '重试 v2 drawing job 失败。');
+      setV2ErrorFromUnknown(error, '重试 v2 drawing job 失败。');
     } finally {
       setIsV2Retrying(false);
     }
   };
 
   const handleCancelV2DrawingJob = async () => {
-    if (!v2Job || isTerminalV2Status(v2Job.status) || isV2Cancelling || isV2Confirming || isV2Retrying) {
+    if (!v2Job || isTerminalV2Status(v2Job.status) || isV2ActionBusy) {
       return;
     }
 
     setIsV2Cancelling(true);
-    setV2UiError(null);
+    clearV2UiError();
     try {
       const cancelled = await cancelDrawingJob(v2Job.jobId, 'frontend-stage7-cancel');
       setV2Job(cancelled);
-      setV2FlowMessage('drawing job 已取消。');
+      persistV2CurrentJob(cancelled.jobId);
+      setV2FlowMessage('drawing job 已取消，可作为历史任务查看。');
       stopV2Polling();
       stopV2Subscription();
       setIsV2PlaybackRunning(false);
       void refreshV2RecentJobs({ silent: true });
     } catch (error) {
       console.error('Cancelling v2 drawing job failed.', error);
-      setV2UiError(error instanceof Error ? error.message : '取消 v2 drawing job 失败。');
+      setV2ErrorFromUnknown(error, '取消 v2 drawing job 失败。');
     } finally {
       setIsV2Cancelling(false);
     }
@@ -716,17 +806,22 @@ export default function App() {
     if (v2Job?.jobId === jobId) {
       v2ActiveJobIdRef.current = jobId;
       await refreshV2JobSnapshot(jobId).catch((error) => {
-        setV2UiError(error instanceof Error ? error.message : '刷新历史任务失败。');
+        if ((error as Error & { status?: number }).status === 404) {
+          clearPersistedV2Job();
+          v2ActiveJobIdRef.current = null;
+        }
+        setV2ErrorFromUnknown(error, '刷新历史任务失败。');
       });
       return;
     }
 
-    setV2UiError(null);
+    clearV2UiError();
     setV2LastEventType(null);
     setV2EventLog([]);
     setV2FlowMessage('正在打开历史 drawing job...');
     resetV2Tracking();
     resetV2Playback();
+    clearPersistedV2EventSeq();
     setV2PreviewAsset(null);
     setV2FinalAsset(null);
     setV2PlaybackManifestAsset(null);
@@ -740,8 +835,46 @@ export default function App() {
     } catch (error) {
       console.error('Opening recent v2 drawing job failed.', error);
       v2ActiveJobIdRef.current = null;
-      setV2UiError(error instanceof Error ? error.message : '打开历史任务失败。');
+      if ((error as Error & { status?: number }).status === 404 || (error as Error & { status?: number }).status === 400) {
+        clearPersistedV2Job();
+      }
+      setV2ErrorFromUnknown(error, '打开历史任务失败。');
       setV2FlowMessage('未能打开历史 drawing job。');
+    }
+  };
+
+  const restoreV2JobFromStorage = async () => {
+    const savedJobId = readPersistedV2JobId();
+    if (!savedJobId || v2ActiveJobIdRef.current === savedJobId) {
+      return;
+    }
+
+    const savedAfterSeq = readPersistedV2EventSeq();
+    clearV2UiError();
+    setV2LastEventType(null);
+    setV2EventLog([]);
+    setV2FlowMessage('正在恢复上次查看的 v2 drawing job...');
+    resetV2Tracking();
+    resetV2Playback();
+    setV2PreviewAsset(null);
+    setV2FinalAsset(null);
+    setV2PlaybackManifestAsset(null);
+
+    try {
+      v2ActiveJobIdRef.current = savedJobId;
+      const job = await refreshV2JobSnapshot(savedJobId);
+      if (!isTerminalV2Status(job.status) && !(job.status === 'preview_ready' && job.requiresConfirmation)) {
+        setV2FlowMessage('已恢复上次任务，正在继续跟踪。');
+        trackV2Job(savedJobId, { afterSeq: savedAfterSeq });
+      } else if (isTerminalV2Status(job.status)) {
+        setV2FlowMessage(`已恢复历史任务：${describeV2Status(job)}`);
+      }
+    } catch (error) {
+      console.error('Restoring persisted v2 drawing job failed.', error);
+      v2ActiveJobIdRef.current = null;
+      clearPersistedV2Job();
+      setV2ErrorFromUnknown(error, '恢复上次 v2 drawing job 失败。');
+      setV2FlowMessage('已清理不可恢复的 v2 drawing job。');
     }
   };
 
@@ -765,6 +898,10 @@ export default function App() {
   useEffect(() => {
     void refreshV2RuntimeReadiness();
     void refreshV2RecentJobs();
+    if (!v2RestoreStartedRef.current) {
+      v2RestoreStartedRef.current = true;
+      void restoreV2JobFromStorage();
+    }
   }, []);
 
   useEffect(() => {
@@ -2329,9 +2466,10 @@ export default function App() {
   }
   const v2CurrentPlaybackStep =
     v2CurrentPlaybackStepIndex >= 0 ? v2PlaybackSteps[v2CurrentPlaybackStepIndex] : v2PlaybackSteps[0] ?? null;
-  const canConfirmV2Job = v2Job?.status === 'preview_ready' && v2Job.requiresConfirmation && !isV2Cancelling;
-  const canRetryV2Job = v2Job?.status === 'failed' && !!v2Job.error?.retryable;
-  const canCancelV2Job = !!v2Job && !isTerminalV2Status(v2Job.status) && !isV2Confirming && !isV2Retrying;
+  const showConfirmV2Job = v2Job?.status === 'preview_ready' && v2Job.requiresConfirmation;
+  const canConfirmV2Job = showConfirmV2Job && !isV2ActionBusy;
+  const canRetryV2Job = v2Job?.status === 'failed' && !!v2Job.error?.retryable && !isV2ActionBusy;
+  const canCancelV2Job = !!v2Job && !isTerminalV2Status(v2Job.status) && !isV2ActionBusy;
   const v2ManifestStepCount = v2PlaybackSteps.length;
   const v2RuntimeModes = v2RuntimeReadiness?.provider.modes;
   const v2RuntimeNetworkLabel = v2RuntimeReadiness
@@ -2661,9 +2799,9 @@ export default function App() {
                 </button>
                 <button
                   onClick={() => void handleStartV2DrawingJob()}
-                  disabled={isV2Submitting || !v2PromptText.trim()}
+                  disabled={isV2ActionBusy || !v2PromptText.trim()}
                   className={`px-3 py-2 rounded-lg text-xs font-semibold border transition-colors ${
-                    isV2Submitting || !v2PromptText.trim()
+                    isV2ActionBusy || !v2PromptText.trim()
                       ? 'opacity-50 cursor-not-allowed bg-transparent border-slate-300 text-slate-400'
                       : 'bg-cyan-500 text-slate-950 border-cyan-400 hover:bg-cyan-400'
                   }`}
@@ -2672,9 +2810,9 @@ export default function App() {
                 </button>
                 <button
                   onClick={() => void handleCancelV2DrawingJob()}
-                  disabled={!canCancelV2Job || isV2Cancelling}
+                  disabled={!canCancelV2Job}
                   className={`px-3 py-2 rounded-lg text-xs font-semibold border transition-colors ${
-                    !canCancelV2Job || isV2Cancelling
+                    !canCancelV2Job
                       ? 'opacity-50 cursor-not-allowed bg-transparent border-slate-300 text-slate-400'
                       : 'bg-transparent text-rose-400 border-rose-400/50 hover:bg-rose-500/10'
                   }`}
@@ -2693,6 +2831,11 @@ export default function App() {
                   <p className={`mt-1 text-[11px] ${isLightMode ? 'text-slate-600' : 'text-slate-400'}`}>
                     {v2UiError ?? v2FlowMessage}
                   </p>
+                  {v2UiErrorDiagnostic && (
+                    <p className={`mt-1 text-[10px] font-mono ${isLightMode ? 'text-rose-600' : 'text-rose-300'}`}>
+                      {v2UiErrorDiagnostic}
+                    </p>
+                  )}
                 </div>
                 {v2Job && (
                   <span className={`text-[11px] font-mono px-2 py-1 rounded border ${isLightMode ? 'bg-white border-slate-200 text-slate-700' : 'bg-[#14141c] border-[#2b2b38] text-slate-300'}`}>
@@ -2792,10 +2935,10 @@ export default function App() {
                 <div className={`rounded-xl overflow-hidden border ${isLightMode ? 'bg-slate-50 border-slate-200' : 'bg-[#0b0c12] border-[#23232d]'}`}>
                   <img src={v2PreviewSrc} alt="V2 preview asset" className="block w-full h-auto" />
                 </div>
-                {canConfirmV2Job && (
+                {showConfirmV2Job && (
                   <button
                     onClick={() => void handleConfirmV2DrawingJob()}
-                    disabled={isV2Confirming}
+                    disabled={!canConfirmV2Job}
                     className="self-start px-3 py-2 rounded-lg text-xs font-semibold bg-emerald-500 text-slate-950 border border-emerald-400 hover:bg-emerald-400 transition-colors"
                   >
                     {isV2Confirming ? '确认中...' : '确认生成高清图'}
@@ -2831,9 +2974,9 @@ export default function App() {
                 )}
                 <button
                   onClick={() => void handleRetryV2DrawingJob()}
-                  disabled={!canRetryV2Job || isV2Retrying}
+                  disabled={!canRetryV2Job}
                   className={`mt-3 px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
-                    !canRetryV2Job || isV2Retrying
+                    !canRetryV2Job
                       ? 'opacity-50 cursor-not-allowed bg-rose-300 text-white'
                       : 'bg-rose-500 text-white hover:bg-rose-400'
                   }`}
@@ -2845,7 +2988,7 @@ export default function App() {
 
             {v2Job?.status === 'cancelled' && (
               <div className={`rounded-lg border p-3 text-[11px] ${isLightMode ? 'bg-slate-100 border-slate-200 text-slate-600' : 'bg-[#181822] border-[#2d2d3c] text-slate-300'}`}>
-                当前 v2 drawing job 已取消。
+                当前 v2 drawing job 已取消，生成链路已停止，可作为历史任务查看。
               </div>
             )}
 

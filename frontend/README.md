@@ -1,5 +1,34 @@
 # VocaSketch Frontend
 
+## Stage 15 v2 Operation Guards
+
+- The v2 panel guards create, confirm, cancel, and retry with a shared in-flight state so repeated clicks do not send overlapping workflow requests.
+- Failed jobs only enable retry when the backend snapshot marks `error.retryable=true`.
+- Cancelled and completed jobs are shown as terminal history views; cancelled jobs no longer imply generation is still running.
+- Retry success switches the panel to the new job and keeps the source job visible through `retryOfJobId`.
+- The default v2 backend profile remains `mock`; the default frontend path does not trigger real external model requests.
+
+## Stage 14 v2 Error Diagnostics
+
+- The frontend v2 API client recognizes the backend error envelope:
+  - `error.code`
+  - `error.message`
+  - `error.retryable`
+  - `error.details`
+- The v2 panel shows a readable error message plus compact diagnostics such as HTTP status, error code, and retryable flag.
+- Failed drawing jobs still use the job snapshot `error` object for retry gating.
+- Readiness, recent jobs, restore, create, confirm, cancel, and retry errors stay local to the v2 panel and do not break the legacy v1 canvas workspace.
+- The default v2 backend profile remains `mock`; the default frontend path does not trigger real external model requests.
+
+## Stage 13 v2 Session Restore
+
+- The v2 panel stores the currently viewed drawing job id in browser storage.
+- On page refresh or reopen, the panel restores that job snapshot, reloads preview/final/manifest metadata, and resumes tracking if the job is still active.
+- Completed, failed, or cancelled jobs restore as static history views.
+- The SSE client can reconnect with `afterSeq` so the backend only replays events after the last seen sequence.
+- If the saved job is missing or invalid, the panel clears the saved state and keeps the rest of the app usable.
+- The default v2 backend profile remains `mock`; the default frontend path does not trigger real external model requests.
+
 ## Stage 12 v2 Panel Continuity
 
 - The v2 drawing panel can now load recent jobs from `GET /api/v2/drawing-jobs`.

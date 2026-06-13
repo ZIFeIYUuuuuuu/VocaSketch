@@ -40,7 +40,7 @@ class JobEventBus:
             await queue.put(event)
         return event
 
-    async def stream(self, job_id: str) -> AsyncIterator[str]:
+    async def stream(self, job_id: str, *, after_seq: int = 0) -> AsyncIterator[str]:
         queue: asyncio.Queue[JobEvent] = asyncio.Queue()
         self._subscribers[job_id].add(queue)
         delivered_sequences: set[int] = set()
@@ -48,12 +48,17 @@ class JobEventBus:
         try:
             existing_events = await self._store.list_events(job_id)
             for event in existing_events:
+                if event.seq <= after_seq:
+                    delivered_sequences.add(event.seq)
+                    continue
                 delivered_sequences.add(event.seq)
                 yield self.format_sse(event)
 
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=15)
+                    if event.seq <= after_seq:
+                        continue
                     if event.seq in delivered_sequences:
                         continue
                     delivered_sequences.add(event.seq)

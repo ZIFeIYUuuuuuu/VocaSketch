@@ -4,6 +4,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime
 
+from .errors import sanitize_error_payload
 from .event_bus import JobEventBus
 from .job_store import JobStore
 from .models import DrawingJob, JobError, JobStatus, TERMINAL_JOB_STATUSES, utc_now
@@ -226,7 +227,9 @@ class MockDrawingWorkflowService:
         if state.parsedIntent is None:
             state = await self._drawing_graph.run_parse_intent(state)
             await self._apply_state(job, state)
-            await self._transition(job, JobStatus.intent_ready, 18)
+            job = await self._transition(job, JobStatus.intent_ready, 18)
+            if job.status != JobStatus.intent_ready:
+                return state
             await self._event_bus.publish(
                 job.jobId,
                 "intent.ready",
@@ -249,7 +252,9 @@ class MockDrawingWorkflowService:
 
         await self._apply_state(job, state)
         if job.status != JobStatus.prompt_ready:
-            await self._transition(job, JobStatus.prompt_ready, 30)
+            job = await self._transition(job, JobStatus.prompt_ready, 30)
+            if job.status != JobStatus.prompt_ready:
+                return state
             await self._event_bus.publish(
                 job.jobId,
                 "prompt.ready",
@@ -274,7 +279,9 @@ class MockDrawingWorkflowService:
             job.previewAssetId = state.previewAsset.assetId
             job.requiresConfirmation = True
             await self._apply_state(job, state)
-            await self._transition(job, JobStatus.preview_ready, 55)
+            job = await self._transition(job, JobStatus.preview_ready, 55)
+            if job.status != JobStatus.preview_ready:
+                return state
             await self._event_bus.publish(
                 job.jobId,
                 "preview.ready",
@@ -295,7 +302,9 @@ class MockDrawingWorkflowService:
             state = await self._drawing_graph.run_generate_final_image(state)
             job.finalAssetId = state.finalAsset.assetId
             await self._apply_state(job, state)
-            await self._transition(job, JobStatus.final_ready, 78)
+            job = await self._transition(job, JobStatus.final_ready, 78)
+            if job.status != JobStatus.final_ready:
+                return state
             await self._event_bus.publish(
                 job.jobId,
                 "final.ready",
@@ -315,7 +324,9 @@ class MockDrawingWorkflowService:
         if not state.layerAssets:
             state = await self._drawing_graph.run_decompose_layers(state)
             await self._apply_state(job, state)
-            await self._transition(job, JobStatus.layers_ready, 92)
+            job = await self._transition(job, JobStatus.layers_ready, 92)
+            if job.status != JobStatus.layers_ready:
+                return state
             await self._event_bus.publish(
                 job.jobId,
                 "layers.ready",
@@ -333,7 +344,9 @@ class MockDrawingWorkflowService:
                 state.playbackManifestAsset.assetId if state.playbackManifestAsset is not None else None
             )
             await self._apply_state(job, state)
-            await self._transition(job, JobStatus.playback_ready, 97)
+            job = await self._transition(job, JobStatus.playback_ready, 97)
+            if job.status != JobStatus.playback_ready:
+                return state
             await self._event_bus.publish(
                 job.jobId,
                 "playback.ready",
@@ -343,9 +356,9 @@ class MockDrawingWorkflowService:
             job = await self._require_active_job(job.jobId)
 
         if job.status != JobStatus.completed:
-            job.completedAt = utc_now()
-            await self._store.save_job(job)
-            await self._transition(job, JobStatus.completed, 100)
+            job = await self._transition(job, JobStatus.completed, 100)
+            if job.status != JobStatus.completed:
+                return state
             await self._event_bus.publish(
                 job.jobId,
                 "job.completed",
@@ -359,6 +372,10 @@ class MockDrawingWorkflowService:
         return state
 
     async def _apply_state(self, job: DrawingJob, state: DrawingWorkflowState) -> None:
+        current = await self._store.get_job(job.jobId)
+        if current and current.status in TERMINAL_JOB_STATUSES:
+            return
+
         job.parsedIntent = state.parsedIntent
         job.visualBrief = state.visualBrief
         job.imagePrompt = state.imagePrompt
@@ -375,11 +392,14 @@ class MockDrawingWorkflowService:
         await self._store.save_job(job)
 
     async def _transition(self, job: DrawingJob, status: JobStatus, progress_percent: int) -> DrawingJob:
-        if job.status in TERMINAL_JOB_STATUSES and status not in TERMINAL_JOB_STATUSES:
+        current = await self._store.get_job(job.jobId)
+        if current and current.status in TERMINAL_JOB_STATUSES:
+            return current
+        if job.status in TERMINAL_JOB_STATUSES:
             return job
 
         job.status = status
-        job.progressPercent = progress_percent
+        job.progressPercent = max(job.progressPercent, current.progressPercent if current else 0, progress_percent)
         job.updatedAt = utc_now()
         if status in {JobStatus.completed, JobStatus.failed, JobStatus.cancelled} and job.completedAt is None:
             job.completedAt = utc_now()
@@ -417,6 +437,7 @@ class MockDrawingWorkflowService:
         job.updatedAt = utc_now()
         job.error = error
         await self._store.save_job(job)
+        safe_error_payload = sanitize_error_payload(error.model_dump(mode="json"))
         await self._event_bus.publish(
             job_id,
             "job.status_changed",
@@ -425,20 +446,14 @@ class MockDrawingWorkflowService:
                 "jobId": job.jobId,
                 "status": job.status,
                 "progressPercent": job.progressPercent,
-                "error": {
-                    "code": error.code,
-                    "phase": error.phase,
-                    "retryable": error.retryable,
-                    "provider": error.provider,
-                    "details": error.details,
-                },
+                "error": safe_error_payload,
             },
         )
         await self._event_bus.publish(
             job_id,
             "job.failed",
             JobStatus.failed,
-            error.model_dump(mode="json"),
+            safe_error_payload,
         )
 
     def _to_job_error(self, phase: JobStatus, exc: Exception) -> JobError:
@@ -451,7 +466,7 @@ class MockDrawingWorkflowService:
                     message=str(cause),
                     retryable=True,
                     provider=cause.provider,
-                    details={"node": exc.node_name, **cause.details},
+                    details={**cause.details, "node": exc.node_name},
                 )
             if isinstance(cause, ProviderSchemaError):
                 return JobError(
@@ -460,7 +475,7 @@ class MockDrawingWorkflowService:
                     message=str(cause),
                     retryable=True,
                     provider=cause.provider,
-                    details={"node": exc.node_name, **cause.details},
+                    details={**cause.details, "node": exc.node_name},
                 )
             if isinstance(cause, ProviderError):
                 return JobError(
@@ -469,7 +484,7 @@ class MockDrawingWorkflowService:
                     message=str(cause),
                     retryable=True,
                     provider=cause.provider,
-                    details={"node": exc.node_name, **cause.details},
+                    details={**cause.details, "node": exc.node_name},
                 )
             return JobError(
                 code="WORKFLOW_NODE_ERROR",

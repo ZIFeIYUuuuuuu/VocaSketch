@@ -29,6 +29,7 @@ interface DrawingJobEventHandlers {
   onEvent?: (event: JobEvent) => void;
   onOpen?: () => void;
   onError?: (error: Event) => void;
+  afterSeq?: number;
 }
 
 export function getV2ApiBaseUrl(): string {
@@ -299,7 +300,12 @@ export function subscribeDrawingJobEvents(
     };
   }
 
-  const source = new EventSource(resolveV2Url(`/api/v2/drawing-jobs/${encodeURIComponent(jobId)}/events`));
+  const params = new URLSearchParams();
+  if (handlers.afterSeq !== undefined && handlers.afterSeq >= 0) {
+    params.set('afterSeq', String(Math.floor(handlers.afterSeq)));
+  }
+  const query = params.toString() ? `?${params.toString()}` : '';
+  const source = new EventSource(resolveV2Url(`/api/v2/drawing-jobs/${encodeURIComponent(jobId)}/events${query}`));
   let isClosed = false;
   const eventTypes: DrawingJobEventType[] = [
     'job.created',
@@ -401,10 +407,16 @@ async function performRequest<T>(
       payload?.error?.message ??
       (typeof detail === 'string' ? detail : null) ??
       `API request failed with ${response.status}`;
-    const error = new Error(message) as Error & { status?: number; code?: string; details?: unknown };
+    const error = new Error(message) as Error & {
+      status?: number;
+      code?: string;
+      details?: unknown;
+      retryable?: boolean;
+    };
     error.status = response.status;
     error.code = payload?.error?.code;
     error.details = payload?.error?.details ?? detail;
+    error.retryable = payload?.error?.retryable;
     throw error;
   }
 

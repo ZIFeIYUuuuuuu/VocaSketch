@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Request, status
 from fastapi.responses import FileResponse
 
 from ..assets.asset_store import AssetContentMissingError
+from ..errors import api_error
 from ..job_store import InvalidIdentifierError
 from ..models import AssetRecord
 
@@ -16,14 +17,26 @@ async def get_asset_content(asset_id: str, request: Request) -> FileResponse:
     try:
         handle = await asset_store.get_asset_content(asset_id)
     except InvalidIdentifierError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        raise api_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="INVALID_ASSET_ID",
+            message="invalid asset id",
+            details={"assetId": asset_id, "operation": "get_asset_content"},
+        ) from exc
     except AssetContentMissingError as exc:
-        raise HTTPException(
+        raise api_error(
             status_code=status.HTTP_410_GONE,
-            detail=str(exc),
+            code="ASSET_CONTENT_MISSING",
+            message=str(exc),
+            details={"assetId": asset_id},
         ) from exc
     if not handle:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="asset not found")
+        raise api_error(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="ASSET_NOT_FOUND",
+            message="asset not found",
+            details={"assetId": asset_id, "operation": "get_asset_content"},
+        )
 
     return FileResponse(
         path=handle.absolute_path,
@@ -37,7 +50,17 @@ async def get_asset(asset_id: str, request: Request) -> AssetRecord:
     try:
         asset = await asset_store.get_asset(asset_id)
     except InvalidIdentifierError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        raise api_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="INVALID_ASSET_ID",
+            message="invalid asset id",
+            details={"assetId": asset_id, "operation": "get_asset"},
+        ) from exc
     if not asset:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="asset not found")
+        raise api_error(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="ASSET_NOT_FOUND",
+            message="asset not found",
+            details={"assetId": asset_id, "operation": "get_asset"},
+        )
     return asset
