@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import json
 import os
 import sys
@@ -24,9 +25,12 @@ if str(SRC_ROOT) not in sys.path:
 from vocasketch_backend.main import create_app
 from vocasketch_backend.providers.base import ProviderProfile
 from vocasketch_backend.providers.transports import (
+    DashScopeImageTransport,
     FakeImageTransport,
     FakeTextTransport,
+    ImageGenerationRequest,
     ImageGenerationResult,
+    OpenAIChatCompatibleImageTransport,
     TransportError,
     TransportTimeoutError,
 )
@@ -53,6 +57,8 @@ class Stage9ImageProviderTests(unittest.TestCase):
             "VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS": "0",
             "VOCASKETCH_OPENAI_API_BASE_URL": "",
             "VOCASKETCH_OPENAI_API_KEY": "",
+            "VOCASKETCH_OPENAI_IMAGE_API_BASE_URL": "",
+            "VOCASKETCH_OPENAI_IMAGE_API_KEY": "",
             "VOCASKETCH_OPENAI_RESPONSE_MODEL": "",
             "VOCASKETCH_OPENAI_IMAGE_MODEL": "",
             "VOCASKETCH_OPENAI_LAYER_MODEL": "",
@@ -204,8 +210,13 @@ class Stage9ImageProviderTests(unittest.TestCase):
         ) as client:
             runtime_info = client.app.state.provider_runtime_info
             self.assertEqual(runtime_info.profile, ProviderProfile.openai)
-            self.assertEqual(runtime_info.safe_settings["mode"], "live-text-live-image")
+            self.assertEqual(runtime_info.safe_settings["mode"], "live-text-live-image-derived-frames")
             self.assertNotIn("super-secret", str(runtime_info.safe_settings))
+
+            readiness = client.get("/api/v2/runtime/readiness")
+            self.assertEqual(readiness.status_code, 200, readiness.text)
+            self.assertEqual(readiness.json()["provider"]["modes"]["layers"], "derived")
+            self.assertEqual(readiness.json()["provider"]["modes"]["playback"], "derived")
 
             created = client.post(
                 "/api/v2/drawing-jobs",
@@ -230,12 +241,14 @@ class Stage9ImageProviderTests(unittest.TestCase):
             self.assertIn("image/png", preview_content.headers["content-type"])
             self.assertEqual(preview_content.content, PNG_1X1_BYTES)
 
-            confirmed = client.post(f"/api/v2/drawing-jobs/{job_id}/confirm", json={})
-            self.assertEqual(confirmed.status_code, 200, confirmed.text)
             completed = self._wait_for_status(client, job_id, "completed")
+            self.assertFalse(completed["requiresConfirmation"])
             self.assertTrue(completed["finalAssetId"])
             self.assertTrue(completed["playbackManifestAssetId"])
-            self.assertGreaterEqual(len(completed["layerAssets"]), 1)
+            self.assertEqual(
+                [layer["role"] for layer in completed["layerAssets"]],
+                ["sketch", "lineart", "flat_color", "shadow", "lighting", "details"],
+            )
 
             final_asset = client.get(f"/api/v2/assets/{completed['finalAssetId']}").json()
             self.assertEqual(final_asset["mimeType"], "image/png")
@@ -245,12 +258,237 @@ class Stage9ImageProviderTests(unittest.TestCase):
             self.assertIn("image/png", final_content.headers["content-type"])
             self.assertEqual(final_content.content, PNG_1X1_BYTES)
 
+            first_layer = completed["layerAssets"][0]
+            self.assertEqual(first_layer["mimeType"], "image/svg+xml")
+            self.assertEqual(first_layer["metadata"]["mode"], "derived-final-playback-frame")
+            self.assertEqual(first_layer["metadata"]["progressPercent"], 10)
+            self.assertEqual(first_layer["sourceFinalAssetId"], completed["finalAssetId"])
+            first_layer_content = client.get(first_layer["contentUrl"])
+            self.assertEqual(first_layer_content.status_code, 200, first_layer_content.text)
+            self.assertIn("image/svg+xml", first_layer_content.headers["content-type"])
+            self.assertIn(final_asset["contentUrl"], first_layer_content.text)
+            self.assertIn("same final asset", first_layer_content.text)
+            manifest_steps = completed["playbackManifest"]["steps"]
+            self.assertEqual([step["label"] for step in manifest_steps], ["10% 草图", "25% 线稿", "45% 平涂", "65% 阴影", "85% 光照", "100% 完成"])
+            self.assertTrue(all(step["transition"] == "replace-frame" for step in manifest_steps))
+
             self.assertEqual(len(fake_text_transport.requests), 3)
             self.assertEqual(len(fake_image_transport.requests), 2)
             self.assertEqual(fake_image_transport.requests[0].mode, "preview")
             self.assertEqual(fake_image_transport.requests[0].size, "768x768")
+            self.assertEqual(fake_image_transport.requests[0].timeout_seconds, 20.0)
             self.assertEqual(fake_image_transport.requests[1].mode, "final")
             self.assertEqual(fake_image_transport.requests[1].size, "1024x1024")
+
+    def test_live_image_can_use_separate_gateway_and_key(self):
+        fake_text_transport = self._fake_text_transport()
+        fake_image_transport = self._fake_image_transport()
+        env = {
+            **self._openai_live_env(),
+            "VOCASKETCH_OPENAI_IMAGE_API_BASE_URL": "https://images.example/v1?token=image-secret",
+            "VOCASKETCH_OPENAI_IMAGE_API_KEY": "image-key-secret",
+        }
+        with self._client(
+            extra_env=env,
+            fake_text_transport=fake_text_transport,
+            fake_image_transport=fake_image_transport,
+        ) as client:
+            runtime_info = client.app.state.provider_runtime_info
+            serialized_runtime = json.dumps(runtime_info.safe_settings, ensure_ascii=False)
+            self.assertEqual(runtime_info.safe_settings["imageApiBaseUrl"], "https://images.example/v1?token=%2A%2A%2A")
+            self.assertNotIn("image-key-secret", serialized_runtime)
+            self.assertNotIn("image-secret", serialized_runtime)
+
+            created = client.post(
+                "/api/v2/drawing-jobs",
+                json={"inputText": "分离生图网关", "locale": "zh-CN"},
+            )
+            self.assertEqual(created.status_code, 202, created.text)
+            job_id = created.json()["jobId"]
+            self._wait_for_status(client, job_id, "preview_ready")
+
+            self.assertEqual(fake_text_transport.requests[0].api_base_url, "https://demo.example/v1?token=secret")
+            self.assertEqual(fake_text_transport.requests[0].api_key, "super-secret")
+            self.assertEqual(fake_image_transport.requests[0].api_base_url, "https://images.example/v1?token=image-secret")
+            self.assertEqual(fake_image_transport.requests[0].api_key, "image-key-secret")
+
+    def test_live_image_auto_generates_final_and_playback_after_preview_without_confirm(self):
+        fake_text_transport = self._fake_text_transport()
+        fake_image_transport = self._fake_image_transport()
+        with self._client(
+            extra_env=self._openai_live_env(),
+            fake_text_transport=fake_text_transport,
+            fake_image_transport=fake_image_transport,
+        ) as client:
+            created = client.post(
+                "/api/v2/drawing-jobs",
+                json={"inputText": "preview 后后台预生成", "locale": "zh-CN"},
+            )
+            self.assertEqual(created.status_code, 202, created.text)
+            job_id = created.json()["jobId"]
+
+            preview = self._wait_for_status(client, job_id, "preview_ready")
+            self.assertFalse(preview["requiresConfirmation"])
+            self.assertIsNone(preview["finalAssetId"])
+
+            completed = self._wait_for_status(client, job_id, "completed")
+            self.assertFalse(completed["requiresConfirmation"])
+            self.assertTrue(completed["finalAssetId"])
+            self.assertTrue(completed["playbackManifestAssetId"])
+            self.assertEqual(len(completed["layerAssets"]), 6)
+            self.assertTrue(
+                all(layer["metadata"]["mode"] == "derived-final-playback-frame" for layer in completed["layerAssets"])
+            )
+            self.assertFalse(
+                any(layer["metadata"].get("provider") == "mock-provider" for layer in completed["layerAssets"])
+            )
+            final_asset = client.get(f"/api/v2/assets/{completed['finalAssetId']}").json()
+            for layer in completed["layerAssets"]:
+                content = client.get(layer["contentUrl"])
+                self.assertEqual(content.status_code, 200, content.text)
+                self.assertIn(final_asset["contentUrl"], content.text)
+                self.assertNotIn("VocaSketch Mock Asset", content.text)
+            self.assertEqual(len(fake_image_transport.requests), 2)
+            self.assertEqual(fake_image_transport.requests[0].mode, "preview")
+            self.assertEqual(fake_image_transport.requests[1].mode, "final")
+
+    def test_dashscope_image_transport_generates_image_bytes_without_exposing_remote_url(self):
+        transport = DashScopeImageTransport()
+        captured_requests = []
+
+        class _FakeHTTPResponse:
+            def __init__(self, payload: bytes):
+                self._payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return self._payload
+
+        def fake_urlopen(request, timeout):
+            captured_requests.append(request)
+            if request.full_url.endswith("/services/aigc/multimodal-generation/generation"):
+                body = json.loads(request.data.decode("utf-8"))
+                self.assertEqual(body["model"], "qwen-image-2.0-pro")
+                self.assertEqual(body["parameters"]["size"], "768*768")
+                self.assertEqual(request.headers["Authorization"], "Bearer dashscope-secret")
+                return _FakeHTTPResponse(
+                    json.dumps(
+                        {
+                            "request_id": "dashscope-request-1",
+                            "output": {
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "content": [
+                                                {"image": "https://dashscope-result.example/image.png?token=secret"},
+                                            ]
+                                        }
+                                    }
+                                ]
+                            },
+                        }
+                    ).encode("utf-8")
+                )
+            if request.full_url.startswith("https://dashscope-result.example/image.png"):
+                return _FakeHTTPResponse(PNG_1X1_BYTES)
+            raise AssertionError(f"Unexpected URL: {request.full_url}")
+
+        request = ImageGenerationRequest(
+            api_base_url="https://dashscope.aliyuncs.com/api/v1",
+            api_key="dashscope-secret",
+            model="qwen-image-2.0-pro",
+            prompt="blue robot",
+            negative_prompt="bad anatomy",
+            size="768x768",
+            timeout_seconds=30,
+            mode="preview",
+            seed=424242,
+        )
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            result = asyncio.run(transport.generate_image(request))
+
+        self.assertEqual(result.content_bytes, PNG_1X1_BYTES)
+        self.assertEqual(result.mime_type, "image/png")
+        self.assertEqual(result.width, 768)
+        self.assertEqual(result.height, 768)
+        self.assertEqual(result.provider_metadata["requestId"], "dashscope-request-1")
+        serialized_metadata = json.dumps(result.provider_metadata, ensure_ascii=False)
+        self.assertNotIn("dashscope-secret", serialized_metadata)
+        self.assertNotIn("token=secret", serialized_metadata)
+        self.assertEqual(len(captured_requests), 2)
+
+    def test_chat_compatible_image_transport_generates_image_bytes_from_markdown_url(self):
+        transport = OpenAIChatCompatibleImageTransport()
+        captured_requests = []
+
+        class _FakeHTTPResponse:
+            def __init__(self, payload: bytes):
+                self._payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return self._payload
+
+        def fake_urlopen(request, timeout):
+            captured_requests.append(request)
+            if request.full_url.endswith("/chat/completions"):
+                body = json.loads(request.data.decode("utf-8"))
+                self.assertEqual(body["model"], "gpt-image-2")
+                self.assertEqual(body["group"], "GPT-image")
+                self.assertEqual(body["messages"][0]["role"], "user")
+                self.assertIn("Return one image only", body["messages"][0]["content"])
+                self.assertEqual(request.headers["Authorization"], "Bearer zc-image-secret")
+                return _FakeHTTPResponse(
+                    json.dumps(
+                        {
+                            "choices": [
+                                {
+                                    "message": {
+                                        "content": "图片已生成：![image](https://zc-result.example/image.png?token=secret)"
+                                    }
+                                }
+                            ]
+                        }
+                    ).encode("utf-8")
+                )
+            if request.full_url.startswith("https://zc-result.example/image.png"):
+                return _FakeHTTPResponse(PNG_1X1_BYTES)
+            raise AssertionError(f"Unexpected URL: {request.full_url}")
+
+        request = ImageGenerationRequest(
+            api_base_url="https://api.codelife.eu.cc/v1",
+            api_key="zc-image-secret",
+            model="gpt-image-2",
+            prompt="anime school portrait",
+            negative_prompt="bad anatomy",
+            size="768x768",
+            timeout_seconds=30,
+            mode="preview",
+            seed=424242,
+            group="GPT-image",
+        )
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            result = asyncio.run(transport.generate_image(request))
+
+        self.assertEqual(result.content_bytes, PNG_1X1_BYTES)
+        self.assertEqual(result.mime_type, "image/png")
+        self.assertEqual(result.width, 768)
+        self.assertEqual(result.height, 768)
+        self.assertEqual(result.provider_metadata["transport"], "openai-chat-compatible")
+        serialized_metadata = json.dumps(result.provider_metadata, ensure_ascii=False)
+        self.assertNotIn("zc-image-secret", serialized_metadata)
+        self.assertNotIn("token=secret", serialized_metadata)
+        self.assertEqual(len(captured_requests), 2)
 
     def test_live_text_without_image_model_falls_back_to_mock_image_assets(self):
         fake_text_transport = self._fake_text_transport()

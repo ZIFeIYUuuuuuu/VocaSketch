@@ -42,6 +42,7 @@ def create_app() -> FastAPI:
             event_bus=event_bus,
             drawing_graph=drawing_graph,
             step_delay_seconds=config.workflow_step_delay_seconds,
+            enable_post_preview_precompute=_should_precompute_after_preview(provider_build.runtime_info),
         )
 
         await store.ensure_ready()
@@ -62,7 +63,10 @@ def create_app() -> FastAPI:
         app.state.event_bus = event_bus
         app.state.workflow = workflow
         await workflow.resume_pending_jobs()
-        yield
+        try:
+            yield
+        finally:
+            await workflow.shutdown()
 
     app = FastAPI(
         title="VocaSketch Python v2 Backend",
@@ -110,3 +114,11 @@ def _is_writable_directory(path: Path) -> bool:
         return True
     except OSError:
         return False
+
+
+def _should_precompute_after_preview(runtime_info) -> bool:
+    mode = str(runtime_info.safe_settings.get("mode", ""))
+    return runtime_info.network_enabled and mode in {
+        "live-text-live-image",
+        "live-text-live-image-derived-frames",
+    }

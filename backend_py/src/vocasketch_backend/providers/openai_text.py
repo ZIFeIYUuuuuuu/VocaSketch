@@ -17,6 +17,11 @@ from .base import (
     ProviderSchemaError,
     ProviderTimeoutError,
 )
+from .derived_playback import (
+    build_derived_playback_frame_specs,
+    build_derived_playback_manifest,
+    can_derive_playback_frames,
+)
 from .llm_prompts import (
     build_image_prompt_prompt,
     build_parse_intent_prompt,
@@ -47,6 +52,10 @@ class OpenAITextProviderGateway(ProviderGateway):
         api_base_url: str,
         safe_api_base_url: str | None,
         api_key: str,
+        image_api_base_url: str,
+        safe_image_api_base_url: str | None,
+        image_api_key: str,
+        image_group: str | None,
         text_model: str,
         image_model: str | None,
         layer_model: str | None,
@@ -58,6 +67,9 @@ class OpenAITextProviderGateway(ProviderGateway):
     ) -> None:
         self._api_base_url = api_base_url
         self._api_key = api_key
+        self._image_api_base_url = image_api_base_url
+        self._image_api_key = image_api_key
+        self._image_group = image_group
         self._text_model = text_model
         self._image_model = image_model
         self._layer_model = layer_model
@@ -84,6 +96,8 @@ class OpenAITextProviderGateway(ProviderGateway):
             ),
             safe_settings={
                 "apiBaseUrl": safe_api_base_url,
+                "imageApiBaseUrl": safe_image_api_base_url,
+                "imageGroup": image_group,
                 "textModel": text_model,
                 "imageModel": image_model,
                 "layerModel": layer_model,
@@ -121,9 +135,22 @@ class OpenAITextProviderGateway(ProviderGateway):
     async def decompose_layers(self, state: DrawingWorkflowState) -> list[GeneratedAssetSpec]:
         if self._can_decompose_layers_live():
             return await self._decompose_layers_live(state)
+        if self._can_generate_live_images() and can_derive_playback_frames(state.finalAsset):
+            return build_derived_playback_frame_specs(
+                final_asset=state.finalAsset,
+                provider_name=self.runtime_info.provider_name,
+                model=self._image_model,
+            )
         return await self._asset_provider.decompose_layers(state)
 
     async def build_playback_manifest(self, state: DrawingWorkflowState) -> PlaybackManifest:
+        if state.layerAssets and all(
+            layer.metadata.get("mode") == "derived-final-playback-frame" for layer in state.layerAssets
+        ):
+            return build_derived_playback_manifest(
+                final_asset=state.finalAsset,
+                layer_assets=state.layerAssets,
+            )
         return await self._asset_provider.build_playback_manifest(state)
 
     async def _generate_structured_output(
@@ -190,8 +217,8 @@ class OpenAITextProviderGateway(ProviderGateway):
             )
 
         request = ImageGenerationRequest(
-            api_base_url=self._api_base_url,
-            api_key=self._api_key,
+            api_base_url=self._image_api_base_url,
+            api_key=self._image_api_key,
             model=self._image_model or "",
             prompt=image_prompt.positivePrompt,
             negative_prompt=image_prompt.negativePrompt,
@@ -200,6 +227,7 @@ class OpenAITextProviderGateway(ProviderGateway):
             mode=mode,
             quality="preview-fast" if mode == "preview" else "final-high",
             seed=image_prompt.seed,
+            group=self._image_group,
         )
 
         try:
@@ -308,7 +336,7 @@ def _runtime_mode(*, image_enabled: bool, layer_enabled: bool) -> str:
     if image_enabled and layer_enabled:
         return "live-text-live-image-live-layers"
     if image_enabled:
-        return "live-text-live-image"
+        return "live-text-live-image-derived-frames"
     if layer_enabled:
         return "live-text-mock-image-live-layers"
     return "live-text-mock-assets"
@@ -316,7 +344,7 @@ def _runtime_mode(*, image_enabled: bool, layer_enabled: bool) -> str:
 
 def _timeout_for_mode(timeout_seconds: float, *, mode: str) -> float:
     if mode == "preview":
-        return max(5.0, min(timeout_seconds, 15.0))
+        return max(timeout_seconds, 15.0)
     return max(timeout_seconds, 15.0)
 
 

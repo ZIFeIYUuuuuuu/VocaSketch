@@ -57,3 +57,35 @@ export function restartPlaybackAt(nowMs) {
     startedAtMs: nowMs,
   };
 }
+
+/**
+ * @param {{ startMs: number, durationMs: number, opacityFrom: number, opacityTo: number, transition?: string }} step
+ * @param {number} elapsedMs
+ * @param {boolean} isLastStep
+ * @returns {number}
+ */
+export function computeStepOpacity(step, elapsedMs, isLastStep = false) {
+  if (step.transition === 'replace-frame') {
+    const endMs = step.startMs + step.durationMs;
+    const isActive = elapsedMs >= step.startMs && (elapsedMs < endMs || (isLastStep && elapsedMs >= endMs));
+    if (!isActive) {
+      return 0;
+    }
+
+    const fadeMs = Math.max(120, Math.min(260, step.durationMs * 0.35));
+    const fadeProgress = clamp((elapsedMs - step.startMs) / fadeMs, 0, 1);
+    const easedProgress = 1 - Math.pow(1 - fadeProgress, 2);
+    return step.opacityFrom + (step.opacityTo - step.opacityFrom) * easedProgress;
+  }
+
+  if (elapsedMs <= step.startMs) {
+    return step.opacityFrom;
+  }
+  if (elapsedMs >= step.startMs + step.durationMs) {
+    return step.opacityTo;
+  }
+
+  const progress = (elapsedMs - step.startMs) / step.durationMs;
+  const easedProgress = 1 - Math.pow(1 - clamp(progress, 0, 1), 2);
+  return step.opacityFrom + (step.opacityTo - step.opacityFrom) * easedProgress;
+}

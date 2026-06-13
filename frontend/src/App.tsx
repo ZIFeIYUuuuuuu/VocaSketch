@@ -24,8 +24,10 @@ import { LayerPanel } from './components/LayerPanel';
 import { StatusIndicator } from './components/StatusIndicator';
 import { VoiceController } from './components/VoiceController';
 import { DemoScriptPanel } from './components/DemoScriptPanel';
+import { ProcessPlaybackPlayer } from './components/ProcessPlaybackPlayer';
 import {
   computePlaybackElapsed,
+  computeStepOpacity,
   pausePlaybackAt,
   restartPlaybackAt,
   resumePlaybackAt,
@@ -34,8 +36,8 @@ import { CharacterConfig, DrawStage, PaintLayer, SystemState, VoiceLog } from '.
 import {
   buildAssetContentUrl,
   cancelDrawingJob,
-  confirmDrawingJob,
   confirmCommand,
+  confirmDrawingJob,
   createDrawingJob,
   createProject,
   createSession,
@@ -91,6 +93,7 @@ const STAGE_BOUNDARIES = {
 } as const;
 type RedrawTarget = 'hair' | 'eyes' | 'expression' | 'outfit' | 'accessory' | 'background';
 const V2_TERMINAL_STATUSES: JobStatus[] = ['completed', 'failed', 'cancelled'];
+const ENABLE_V2_VOICE_DRAWING = import.meta.env.VITE_ENABLE_V2_VOICE_DRAWING !== 'false';
 
 export default function App() {
   // -------------------------------------------------------------------------
@@ -136,7 +139,6 @@ export default function App() {
   const [redoCount, setRedoCount] = useState<number>(0);
   const [v2PromptText, setV2PromptText] = useState<string>('');
   const [v2Job, setV2Job] = useState<DrawingJob | null>(null);
-  const [v2PreviewAsset, setV2PreviewAsset] = useState<AssetRecord | null>(null);
   const [v2FinalAsset, setV2FinalAsset] = useState<AssetRecord | null>(null);
   const [v2PlaybackManifestAsset, setV2PlaybackManifestAsset] = useState<AssetRecord | null>(null);
   const [v2LastEventType, setV2LastEventType] = useState<JobEvent['type'] | null>(null);
@@ -151,10 +153,9 @@ export default function App() {
   const [v2RuntimeError, setV2RuntimeError] = useState<string | null>(null);
   const [isV2RuntimeLoading, setIsV2RuntimeLoading] = useState<boolean>(false);
   const [isV2Submitting, setIsV2Submitting] = useState<boolean>(false);
-  const [isV2Confirming, setIsV2Confirming] = useState<boolean>(false);
   const [isV2Retrying, setIsV2Retrying] = useState<boolean>(false);
   const [isV2Cancelling, setIsV2Cancelling] = useState<boolean>(false);
-  const isV2ActionBusy = isV2Submitting || isV2Confirming || isV2Retrying || isV2Cancelling;
+  const isV2ActionBusy = isV2Submitting || isV2Retrying || isV2Cancelling;
   const [isV2PlaybackRunning, setIsV2PlaybackRunning] = useState<boolean>(false);
   const [v2PlaybackElapsedMs, setV2PlaybackElapsedMs] = useState<number>(0);
   const [v2PlaybackSessionNonce, setV2PlaybackSessionNonce] = useState<number>(0);
@@ -204,6 +205,7 @@ export default function App() {
   const v2ActiveJobIdRef = useRef<string | null>(null);
   const v2LastEventSeqRef = useRef<number>(0);
   const v2RestoreStartedRef = useRef<boolean>(false);
+  const v2AutoAdvanceJobIdRef = useRef<string | null>(null);
   const v2PlaybackRafRef = useRef<number | null>(null);
   const v2PlaybackStartedAtRef = useRef<number | null>(null);
   const v2PlaybackBaseElapsedRef = useRef<number>(0);
@@ -287,6 +289,7 @@ export default function App() {
   };
 
   const isTerminalV2Status = (status?: JobStatus | null) => !!status && V2_TERMINAL_STATUSES.includes(status);
+  const shouldAutoAdvanceV2Frames = (job: DrawingJob) => job.status === 'preview_ready' && job.requiresConfirmation;
 
   const clearV2UiError = () => {
     setV2UiError(null);
@@ -383,23 +386,30 @@ export default function App() {
   };
 
   const loadV2AssetSet = async (job: DrawingJob) => {
-    const [previewAsset, finalAsset, manifestAsset] = await Promise.all([
-      job.previewAssetId ? getAssetMetadata(job.previewAssetId).catch(() => null) : Promise.resolve(null),
+    const [finalAsset, manifestAsset] = await Promise.all([
       job.finalAssetId ? getAssetMetadata(job.finalAssetId).catch(() => null) : Promise.resolve(null),
       job.playbackManifestAssetId ? getAssetMetadata(job.playbackManifestAssetId).catch(() => null) : Promise.resolve(null)
     ]);
 
-    setV2PreviewAsset(previewAsset);
     setV2FinalAsset(finalAsset);
     setV2PlaybackManifestAsset(manifestAsset);
   };
 
   const describeV2Status = (job: DrawingJob) => {
     if (job.status === 'preview_ready' && job.requiresConfirmation) {
-      return '预览图已准备好，等待确认生成高清终稿。';
+      return '内部构图已完成，正在自动进入绘画过程帧生成。';
+    }
+    if (job.status === 'preview_ready') {
+      return '内部构图已完成，正在生成绘画过程帧。';
+    }
+    if (job.status === 'final_generating') {
+      return '正在生成最终图，完成后会直接展示绘画过程帧。';
+    }
+    if (job.status === 'layers_generating' || job.status === 'layers_ready' || job.status === 'playback_ready') {
+      return '正在整理 10% 到 100% 的绘画过程帧。';
     }
     if (job.status === 'completed') {
-      return '高清终稿与分层资产已完成。';
+      return '绘画过程帧已完成，可以查看和回放。';
     }
     if (job.status === 'failed') {
       return job.error?.message ?? 'drawing job 失败';
@@ -408,6 +418,38 @@ export default function App() {
       return 'drawing job 已取消。';
     }
     return `当前状态：${job.status}（${job.progressPercent}%）`;
+  };
+
+  const autoAdvanceV2Frames = async (job: DrawingJob) => {
+    if (!shouldAutoAdvanceV2Frames(job) || v2AutoAdvanceJobIdRef.current === job.jobId) {
+      return;
+    }
+
+    v2AutoAdvanceJobIdRef.current = job.jobId;
+    setV2FlowMessage('内部构图完成，正在自动进入 10% 到 100% 帧生成。');
+
+    try {
+      const advanced = await confirmDrawingJob(job.jobId, {
+        selectedPreviewAssetId: job.previewAssetId ?? undefined,
+        notes: 'frontend-auto-advance-to-frame-generation'
+      });
+
+      if (v2ActiveJobIdRef.current !== job.jobId) {
+        return;
+      }
+
+      setV2Job(advanced);
+      await loadV2AssetSet(advanced);
+      setV2FlowMessage(describeV2Status(advanced));
+      void refreshV2RecentJobs({ silent: true });
+    } catch (error) {
+      console.error('Auto advancing v2 drawing job to frame generation failed.', error);
+      setV2ErrorFromUnknown(error, '自动进入绘画过程帧生成失败。');
+    } finally {
+      if (v2AutoAdvanceJobIdRef.current === job.jobId) {
+        v2AutoAdvanceJobIdRef.current = null;
+      }
+    }
   };
 
   const refreshV2JobSnapshot = async (jobId: string) => {
@@ -422,7 +464,11 @@ export default function App() {
     setV2FlowMessage(describeV2Status(job));
     await loadV2AssetSet(job);
 
-    if (isTerminalV2Status(job.status) || (job.status === 'preview_ready' && job.requiresConfirmation)) {
+    if (shouldAutoAdvanceV2Frames(job)) {
+      void autoAdvanceV2Frames(job);
+    }
+
+    if (isTerminalV2Status(job.status)) {
       stopV2Polling();
       void refreshV2RecentJobs({ silent: true });
     }
@@ -675,8 +721,8 @@ export default function App() {
     setV2PromptText(transcript);
   };
 
-  const handleStartV2DrawingJob = async () => {
-    const prompt = v2PromptText.trim();
+  const startV2DrawingJobFromText = async (rawPrompt: string) => {
+    const prompt = rawPrompt.trim();
     if (isV2ActionBusy) {
       return;
     }
@@ -689,7 +735,6 @@ export default function App() {
     setIsV2Submitting(true);
     clearV2UiError();
     setV2Job(null);
-    setV2PreviewAsset(null);
     setV2FinalAsset(null);
     setV2PlaybackManifestAsset(null);
     setV2LastEventType(null);
@@ -722,27 +767,8 @@ export default function App() {
     }
   };
 
-  const handleConfirmV2DrawingJob = async () => {
-    if (!v2Job || v2Job.status !== 'preview_ready' || !v2Job.requiresConfirmation || isV2ActionBusy) {
-      return;
-    }
-
-    setIsV2Confirming(true);
-    clearV2UiError();
-    try {
-      const confirmed = await confirmDrawingJob(v2Job.jobId, {
-        notes: 'frontend-stage7-confirm'
-      });
-      setV2Job(confirmed);
-      setV2FlowMessage('已确认预览，正在继续生成高清终稿。');
-      await loadV2AssetSet(confirmed);
-      trackV2Job(confirmed.jobId);
-    } catch (error) {
-      console.error('Confirming v2 drawing job failed.', error);
-      setV2ErrorFromUnknown(error, '确认 v2 drawing job 失败。');
-    } finally {
-      setIsV2Confirming(false);
-    }
+  const handleStartV2DrawingJob = async () => {
+    await startV2DrawingJobFromText(v2PromptText);
   };
 
   const handleRetryV2DrawingJob = async () => {
@@ -757,7 +783,6 @@ export default function App() {
         fromPhase: v2Job.error?.phase,
         reason: 'frontend-stage7-retry'
       });
-      setV2PreviewAsset(null);
       setV2FinalAsset(null);
       setV2PlaybackManifestAsset(null);
       setV2LastEventType(null);
@@ -822,14 +847,13 @@ export default function App() {
     resetV2Tracking();
     resetV2Playback();
     clearPersistedV2EventSeq();
-    setV2PreviewAsset(null);
     setV2FinalAsset(null);
     setV2PlaybackManifestAsset(null);
 
     try {
       v2ActiveJobIdRef.current = jobId;
       const job = await refreshV2JobSnapshot(jobId);
-      if (!isTerminalV2Status(job.status) && !(job.status === 'preview_ready' && job.requiresConfirmation)) {
+      if (!isTerminalV2Status(job.status)) {
         trackV2Job(jobId);
       }
     } catch (error) {
@@ -856,14 +880,13 @@ export default function App() {
     setV2FlowMessage('正在恢复上次查看的 v2 drawing job...');
     resetV2Tracking();
     resetV2Playback();
-    setV2PreviewAsset(null);
     setV2FinalAsset(null);
     setV2PlaybackManifestAsset(null);
 
     try {
       v2ActiveJobIdRef.current = savedJobId;
       const job = await refreshV2JobSnapshot(savedJobId);
-      if (!isTerminalV2Status(job.status) && !(job.status === 'preview_ready' && job.requiresConfirmation)) {
+      if (!isTerminalV2Status(job.status)) {
         setV2FlowMessage('已恢复上次任务，正在继续跟踪。');
         trackV2Job(savedJobId, { afterSeq: savedAfterSeq });
       } else if (isTerminalV2Status(job.status)) {
@@ -1082,8 +1105,17 @@ export default function App() {
     const text = rawText.trim();
     if (!text) return;
 
-    if (!/^(确定|确认|取消|放弃|不要了|暂停|停一下|先停|继续|接着|回放|重新放|重演|撤销|上一步|撤消|重做|恢复下一步|前进)\b/.test(text)) {
+    const isControlCommand = /^(确定|确认|取消|放弃|不要了|暂停|停一下|先停|继续|接着|回放|重新放|重演|撤销|上一步|撤消|重做|恢复下一步|前进)\b/.test(text);
+    if (!isControlCommand) {
       setV2PromptText(text);
+    }
+
+    if (ENABLE_V2_VOICE_DRAWING && !isControlCommand) {
+      pushLog('user', text);
+      setUserSpeechSub(text);
+      pushLog('system', '已将语音绘图描述发送到 Python v2 Drawing Job。');
+      await startV2DrawingJobFromText(text);
+      return;
     }
 
     if (/确定|确认|ok|好的|开始|没错|绘制|可以/.test(text) && isAwaitingConfirm) {
@@ -1990,6 +2022,11 @@ export default function App() {
       return;
     }
 
+    if (ENABLE_V2_VOICE_DRAWING) {
+      startWebSpeechFallback('Python v2 语音绘图模式：使用浏览器识别，结果直接发送到 backend_py。');
+      return;
+    }
+
     if (!sessionId || !projectId) {
       startWebSpeechFallback('工程会话尚未就绪，临时切换浏览器识别。');
       return;
@@ -2421,11 +2458,6 @@ export default function App() {
     r.start();
   };
 
-  const v2PreviewSrc = v2PreviewAsset
-    ? buildAssetContentUrl(v2PreviewAsset)
-    : v2Job?.previewAssetId
-      ? buildAssetContentUrl(v2Job.previewAssetId)
-      : null;
   const v2FinalSrc = v2FinalAsset
     ? buildAssetContentUrl(v2FinalAsset)
     : v2Job?.finalAssetId
@@ -2436,16 +2468,18 @@ export default function App() {
   const v2PlaybackSteps: PlaybackManifestStep[] = [...(v2Job?.playbackManifest?.steps ?? [])].sort(
     (left, right) => left.order - right.order
   );
+  const v2PlaybackProcess = v2Job?.playbackManifest?.process ?? null;
   const v2PlaybackDurationMs = v2Job?.playbackManifest?.durationMs ?? 0;
   const v2PlaybackSignature = `${v2Job?.jobId ?? 'none'}:${v2Job?.playbackManifestAssetId ?? 'none'}`;
   const v2PlaybackLayers = v2PlaybackSteps
-    .map((step) => {
+    .map((step, stepIndex) => {
       const layer = step.assetId ? v2LayerAssetsById.get(step.assetId) : undefined;
       if (!layer) {
         return null;
       }
       return {
         step,
+        stepIndex,
         layer,
         src: buildAssetContentUrl({
           assetId: layer.assetId,
@@ -2453,8 +2487,9 @@ export default function App() {
         }),
       };
     })
-    .filter((entry): entry is { step: PlaybackManifestStep; layer: LayerAsset; src: string } => entry !== null);
-  const v2HasPlayableManifest = v2PlaybackLayers.length > 0 && v2PlaybackDurationMs > 0;
+    .filter((entry): entry is { step: PlaybackManifestStep; stepIndex: number; layer: LayerAsset; src: string } => entry !== null);
+  const v2HasProcessPlayback = !!v2PlaybackProcess && !!v2FinalSrc;
+  const v2HasPlayableManifest = (v2PlaybackLayers.length > 0 || v2HasProcessPlayback) && v2PlaybackDurationMs > 0;
   let v2CurrentPlaybackStepIndex = -1;
   for (let index = 0; index < v2PlaybackSteps.length; index += 1) {
     const step = v2PlaybackSteps[index];
@@ -2466,8 +2501,6 @@ export default function App() {
   }
   const v2CurrentPlaybackStep =
     v2CurrentPlaybackStepIndex >= 0 ? v2PlaybackSteps[v2CurrentPlaybackStepIndex] : v2PlaybackSteps[0] ?? null;
-  const showConfirmV2Job = v2Job?.status === 'preview_ready' && v2Job.requiresConfirmation;
-  const canConfirmV2Job = showConfirmV2Job && !isV2ActionBusy;
   const canRetryV2Job = v2Job?.status === 'failed' && !!v2Job.error?.retryable && !isV2ActionBusy;
   const canCancelV2Job = !!v2Job && !isTerminalV2Status(v2Job.status) && !isV2ActionBusy;
   const v2ManifestStepCount = v2PlaybackSteps.length;
@@ -2501,17 +2534,21 @@ export default function App() {
     return normalized.length > 48 ? `${normalized.slice(0, 48)}...` : normalized || '(empty prompt)';
   };
 
-  const getV2PlaybackOpacity = (startMs: number, durationMs: number, opacityFrom: number, opacityTo: number) => {
-    if (v2PlaybackElapsedMs <= startMs) {
-      return opacityFrom;
-    }
-    if (v2PlaybackElapsedMs >= startMs + durationMs) {
-      return opacityTo;
-    }
+  const getV2FrameStepLabel = (step: PlaybackManifestStep, index: number) => {
+    const roleLabels: Record<string, string> = {
+      sketch: '10% 草图',
+      lineart: '25% 线稿',
+      flat_color: '45% 平涂',
+      shadow: '65% 阴影',
+      lighting: '85% 光照',
+      details: '100% 完成'
+    };
+    const fallbackLabels = ['10% 草图', '25% 线稿', '45% 平涂', '65% 阴影', '85% 光照', '100% 完成'];
+    return roleLabels[step.role] ?? fallbackLabels[index] ?? step.label;
+  };
 
-    const progress = (v2PlaybackElapsedMs - startMs) / durationMs;
-    const easedProgress = 1 - Math.pow(1 - Math.min(Math.max(progress, 0), 1), 2);
-    return opacityFrom + (opacityTo - opacityFrom) * easedProgress;
+  const getV2PlaybackOpacity = (step: PlaybackManifestStep, stepIndex: number) => {
+    return computeStepOpacity(step, v2PlaybackElapsedMs, stepIndex === v2PlaybackSteps.length - 1);
   };
 
   useEffect(() => {
@@ -2731,7 +2768,7 @@ export default function App() {
                   <span>Python v2 Drawing Job</span>
                 </div>
                 <p className={`mt-1 text-[11px] leading-relaxed ${isLightMode ? 'text-slate-600' : 'text-slate-400'}`}>
-                  这条链路直接接到 `backend_py` 的异步 drawing job，用于显示 preview / final 资产，不替换下方 legacy Canvas。
+                  这条链路直接接到 `backend_py` 的异步 drawing job。提交后等待帧生成完成，再展示 10% 到 100% 的绘画过程。
                 </p>
               </div>
               <span className={`text-[10px] font-mono px-2 py-1 rounded border ${isLightMode ? 'bg-slate-50 border-slate-200 text-slate-500' : 'bg-[#181822] border-[#2d2d3c] text-slate-400'}`}>
@@ -2765,7 +2802,7 @@ export default function App() {
                 <span>runner: {v2RuntimeReadiness?.workflow.runnerMode ?? '--'}</span>
                 <span>network: {v2RuntimeNetworkLabel}</span>
                 <span>text: {v2RuntimeModes?.text ?? '--'}</span>
-                <span>preview: {v2RuntimeModes?.preview ?? '--'}</span>
+                <span>内部构图: {v2RuntimeModes?.preview ?? '--'}</span>
                 <span>final: {v2RuntimeModes?.final ?? '--'}</span>
                 <span>layers: {v2RuntimeModes?.layers ?? '--'}</span>
               </div>
@@ -2773,7 +2810,7 @@ export default function App() {
 
             <div className="flex flex-col gap-2">
               <label className={`text-[11px] font-semibold ${isLightMode ? 'text-slate-700' : 'text-slate-300'}`}>
-                输入绘图描述，或先用语音说一句再点“使用最近识别文本”
+                输入绘图描述，或直接用语音说一句；普通绘图描述会自动创建 Python v2 job
               </label>
               <textarea
                 value={v2PromptText}
@@ -2853,7 +2890,7 @@ export default function App() {
                   </div>
                   <div className={`mt-2 flex flex-wrap gap-2 text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
                     <span>last event: {v2LastEventType ?? 'waiting'}</span>
-                    <span>requires confirmation: {v2Job.requiresConfirmation ? 'yes' : 'no'}</span>
+                    <span>{v2Job.requiresConfirmation ? '自动进入帧生成中' : '无需用户确认'}</span>
                     {v2Job.retryOfJobId && <span>retry of: {v2Job.retryOfJobId}</span>}
                   </div>
                 </>
@@ -2911,7 +2948,7 @@ export default function App() {
                         </div>
                         <div className={`mt-1 flex flex-wrap gap-2 text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
                           <span>{formatV2JobTime(job.updatedAt)}</span>
-                          <span>{job.finalAssetId ? 'final ready' : job.previewAssetId ? 'preview ready' : 'no asset yet'}</span>
+                          <span>{job.playbackManifestAssetId ? 'frames ready' : job.finalAssetId ? 'final ready' : job.previewAssetId ? 'frame generation' : 'no asset yet'}</span>
                           {job.retryOfJobId && <span>retry of {job.retryOfJobId}</span>}
                           {job.error && <span>{job.error.code}</span>}
                         </div>
@@ -2922,44 +2959,9 @@ export default function App() {
               )}
             </div>
 
-            {v2PreviewSrc && (
-              <div className="flex flex-col gap-3">
-                <div className="flex items-center justify-between">
-                  <p className={`text-xs font-bold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>Preview Asset</p>
-                  {v2PreviewAsset && (
-                    <span className={`text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
-                      {v2PreviewAsset.mimeType} · {v2PreviewAsset.byteSize ?? 0} bytes
-                    </span>
-                  )}
-                </div>
-                <div className={`rounded-xl overflow-hidden border ${isLightMode ? 'bg-slate-50 border-slate-200' : 'bg-[#0b0c12] border-[#23232d]'}`}>
-                  <img src={v2PreviewSrc} alt="V2 preview asset" className="block w-full h-auto" />
-                </div>
-                {showConfirmV2Job && (
-                  <button
-                    onClick={() => void handleConfirmV2DrawingJob()}
-                    disabled={!canConfirmV2Job}
-                    className="self-start px-3 py-2 rounded-lg text-xs font-semibold bg-emerald-500 text-slate-950 border border-emerald-400 hover:bg-emerald-400 transition-colors"
-                  >
-                    {isV2Confirming ? '确认中...' : '确认生成高清图'}
-                  </button>
-                )}
-              </div>
-            )}
-
-            {v2FinalSrc && (
-              <div className="flex flex-col gap-3">
-                <div className="flex items-center justify-between">
-                  <p className={`text-xs font-bold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>Final Asset</p>
-                  {v2FinalAsset && (
-                    <span className={`text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
-                      {v2FinalAsset.checksum?.slice(0, 12) ?? 'no-checksum'}
-                    </span>
-                  )}
-                </div>
-                <div className={`rounded-xl overflow-hidden border ${isLightMode ? 'bg-slate-50 border-slate-200' : 'bg-[#0b0c12] border-[#23232d]'}`}>
-                  <img src={v2FinalSrc} alt="V2 final asset" className="block w-full h-auto" />
-                </div>
+            {v2Job && !isTerminalV2Status(v2Job.status) && !v2HasPlayableManifest && (
+              <div className={`rounded-lg border p-3 text-[11px] ${isLightMode ? 'bg-cyan-50 border-cyan-200 text-cyan-700' : 'bg-cyan-950/20 border-cyan-500/30 text-cyan-200'}`}>
+                正在生成绘画过程帧。内部构图只在后端使用，用户侧直接等待 10% 到 100% 进度图。
               </div>
             )}
 
@@ -2994,14 +2996,14 @@ export default function App() {
 
             {v2Job?.status === 'completed' && (
               <div className={`rounded-lg border p-3 text-[11px] ${isLightMode ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-emerald-950/20 border-emerald-500/30 text-emerald-200'}`}>
-                当前 v2 drawing job 已完成，final image、layers 与 playback manifest 可继续查看和回放。
+                当前 v2 drawing job 已完成，绘画过程帧可继续查看和回放。
               </div>
             )}
 
             {(v2LayerAssets.length > 0 || v2ManifestStepCount > 0) && (
               <div className="flex flex-col gap-3">
                 <div className="flex items-center justify-between">
-                  <p className={`text-xs font-bold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>Layers & Playback</p>
+                  <p className={`text-xs font-bold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>绘画过程帧</p>
                   <span className={`text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
                     layers {v2LayerAssets.length} · steps {v2ManifestStepCount}
                   </span>
@@ -3010,10 +3012,10 @@ export default function App() {
                   <div className={`rounded-xl border p-3 ${isLightMode ? 'bg-slate-50 border-slate-200' : 'bg-[#0c0d12] border-[#23232d]'}`}>
                     <div className="flex items-center justify-between gap-3">
                       <div>
-                        <p className={`text-xs font-semibold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>Layer Playback Preview</p>
+                        <p className={`text-xs font-semibold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>10% 到 100% 生成过程</p>
                         <p className={`mt-1 text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
                           step {Math.max(v2CurrentPlaybackStepIndex + 1, 1)} / {v2ManifestStepCount}
-                          {v2CurrentPlaybackStep ? ` · ${v2CurrentPlaybackStep.label}` : ''}
+                          {v2CurrentPlaybackStep ? ` · ${getV2FrameStepLabel(v2CurrentPlaybackStep, Math.max(v2CurrentPlaybackStepIndex, 0))}` : ''}
                         </p>
                       </div>
                       <div className="flex items-center gap-2">
@@ -3046,32 +3048,38 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className={`mt-3 relative aspect-square w-full overflow-hidden rounded-xl border ${isLightMode ? 'bg-white border-slate-200' : 'bg-[#090a10] border-[#1f2230]'}`}>
-                      {v2FinalSrc && (
-                        <img
-                          src={v2FinalSrc}
-                          alt="V2 final composite background"
-                          className="absolute inset-0 h-full w-full object-cover"
-                          style={{ opacity: 0.08 }}
+                    <div className="mt-3">
+                      {v2HasProcessPlayback && v2PlaybackProcess && v2FinalSrc ? (
+                        <ProcessPlaybackPlayer
+                          process={v2PlaybackProcess}
+                          finalSrc={v2FinalSrc}
+                          elapsedMs={v2PlaybackElapsedMs}
+                          isLightMode={isLightMode}
                         />
+                      ) : (
+                        <div className={`relative aspect-square w-full overflow-hidden rounded-xl border ${isLightMode ? 'bg-white border-slate-200' : 'bg-[#090a10] border-[#1f2230]'}`}>
+                          {v2FinalSrc && (
+                            <img
+                              src={v2FinalSrc}
+                              alt="V2 final composite background"
+                              className="absolute inset-0 h-full w-full object-cover"
+                              style={{ opacity: 0.08 }}
+                            />
+                          )}
+                          {v2PlaybackLayers.map(({ step, stepIndex, layer, src }) => (
+                            <img
+                              key={layer.assetId}
+                              src={src}
+                              alt={layer.label}
+                              className="absolute inset-0 h-full w-full object-cover transition-opacity duration-300"
+                              style={{
+                                opacity: getV2PlaybackOpacity(step, stepIndex),
+                                mixBlendMode: step.blendMode as React.CSSProperties['mixBlendMode'],
+                              }}
+                            />
+                          ))}
+                        </div>
                       )}
-                      {v2PlaybackLayers.map(({ step, layer, src }) => (
-                        <img
-                          key={layer.assetId}
-                          src={src}
-                          alt={layer.label}
-                          className="absolute inset-0 h-full w-full object-cover transition-opacity duration-300"
-                          style={{
-                            opacity: getV2PlaybackOpacity(
-                              step.startMs,
-                              step.durationMs,
-                              step.opacityFrom,
-                              step.opacityTo
-                            ),
-                            mixBlendMode: step.blendMode as React.CSSProperties['mixBlendMode'],
-                          }}
-                        />
-                      ))}
                     </div>
 
                     <div className="mt-3 flex flex-col gap-2">
@@ -3103,7 +3111,7 @@ export default function App() {
                           }`}
                         >
                           <div className="flex items-center justify-between gap-2">
-                            <p className={`text-[11px] font-semibold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>{step.label}</p>
+                            <p className={`text-[11px] font-semibold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>{getV2FrameStepLabel(step, index)}</p>
                             <span className={`text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>#{step.order}</span>
                           </div>
                           <p className={`mt-1 text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
@@ -3146,7 +3154,8 @@ export default function App() {
                 </div>
                 {v2PlaybackManifestAsset && (
                   <div className={`rounded-lg border p-3 text-[11px] ${isLightMode ? 'bg-slate-50 border-slate-200 text-slate-600' : 'bg-[#0c0d12] border-[#23232d] text-slate-300'}`}>
-                    Playback manifest 已就绪，共 {v2ManifestStepCount} 步，前端会按 step 的时间轴和 blendMode 播放分层过程。
+                    Playback manifest 已就绪，共 {v2ManifestStepCount} 步
+                    {v2PlaybackProcess ? `，动作 ${v2PlaybackProcess.actions.length} 个` : ''}，前端会按时间轴播放绘画过程。
                   </div>
                 )}
               </div>

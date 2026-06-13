@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   computePlaybackElapsed,
+  computeStepOpacity,
   pausePlaybackAt,
   restartPlaybackAt,
   resumePlaybackAt,
@@ -39,4 +40,30 @@ test('restartPlaybackAt resets elapsed to zero', () => {
     baseElapsedMs: 0,
     startedAtMs: 1200,
   });
+});
+
+test('computeStepOpacity replaces frame after its time window', () => {
+  const step = {
+    startMs: 1000,
+    durationMs: 800,
+    opacityFrom: 0,
+    opacityTo: 1,
+    transition: 'replace-frame',
+  };
+
+  assert.equal(computeStepOpacity(step, 900), 0);
+  assert.ok(computeStepOpacity(step, 1120) > 0);
+  assert.equal(computeStepOpacity(step, 1800), 0);
+});
+
+test('computeStepOpacity keeps last replace-frame visible after completion', () => {
+  const step = {
+    startMs: 4000,
+    durationMs: 900,
+    opacityFrom: 0,
+    opacityTo: 1,
+    transition: 'replace-frame',
+  };
+
+  assert.equal(computeStepOpacity(step, 5000, true), 1);
 });

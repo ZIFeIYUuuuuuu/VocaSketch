@@ -30,6 +30,8 @@ PROVIDER_ENV_BASELINE = {
     "VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS": "0",
     "VOCASKETCH_OPENAI_API_BASE_URL": "",
     "VOCASKETCH_OPENAI_API_KEY": "",
+    "VOCASKETCH_OPENAI_IMAGE_API_BASE_URL": "",
+    "VOCASKETCH_OPENAI_IMAGE_API_KEY": "",
     "VOCASKETCH_OPENAI_RESPONSE_MODEL": "",
     "VOCASKETCH_OPENAI_IMAGE_MODEL": "",
     "VOCASKETCH_OPENAI_LAYER_MODEL": "",
@@ -209,6 +211,22 @@ class Stage11ReadinessAndObservabilityTests(unittest.TestCase):
         ):
             with self.assertRaises(ProviderConfigError) as raised:
                 get_provider_config()
+        self.assertIn("absolute http(s) URL", str(raised.exception))
+
+    def test_openai_invalid_image_base_url_is_provider_config_error(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                **PROVIDER_ENV_BASELINE,
+                "VOCASKETCH_PROVIDER_PROFILE": "openai",
+                "VOCASKETCH_OPENAI_RESPONSE_MODEL": "gpt-structured",
+                "VOCASKETCH_OPENAI_IMAGE_API_BASE_URL": "not-a-url",
+            },
+            clear=False,
+        ):
+            with self.assertRaises(ProviderConfigError) as raised:
+                get_provider_config()
+        self.assertIn("VOCASKETCH_OPENAI_IMAGE_API_BASE_URL", str(raised.exception))
         self.assertIn("absolute http(s) URL", str(raised.exception))
 
     def test_dashscope_profile_ignores_dirty_openai_timeout_env(self):

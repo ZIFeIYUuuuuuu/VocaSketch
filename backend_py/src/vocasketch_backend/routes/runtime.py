@@ -67,10 +67,13 @@ def _provider_modes(runtime_info: ProviderRuntimeInfo) -> dict[str, str]:
         }
 
     mode = str(runtime_info.safe_settings.get("mode", "unknown"))
+    uses_live_image = "live-image" in mode
+    uses_live_layers = "live-layers" in mode
+    uses_derived_frames = uses_live_image and "derived-frames" in mode
     return {
         "text": "live" if mode.startswith("live-text") else "mock",
-        "preview": "live" if "live-image" in mode else "mock",
-        "final": "live" if "live-image" in mode else "mock",
-        "layers": "live" if "live-layers" in mode else "mock",
-        "playback": "mock",
+        "preview": "live" if uses_live_image else "mock",
+        "final": "live" if uses_live_image else "mock",
+        "layers": "live" if uses_live_layers else "derived" if uses_derived_frames else "mock",
+        "playback": "derived" if uses_derived_frames else "mock",
     }

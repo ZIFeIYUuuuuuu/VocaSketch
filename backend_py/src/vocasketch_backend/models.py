@@ -110,6 +110,7 @@ class PlaybackManifest(BaseModel):
     steps: list[PlaybackManifestStep] = Field(default_factory=list)
     layerRefs: list[str] = Field(default_factory=list)
     finalCompositeAssetId: str | None = None
+    process: dict[str, Any] | None = None
 
 
 class JobError(BaseModel):

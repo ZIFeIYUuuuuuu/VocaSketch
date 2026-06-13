@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -48,6 +49,7 @@ class ImageGenerationRequest:
     mode: str = "final"
     quality: str | None = None
     seed: int | None = None
+    group: str | None = None
 
 
 @dataclass(frozen=True)
@@ -196,6 +198,10 @@ class OpenAICompatibleImageTransport:
             method="POST",
             headers={
                 "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*",
+                "Origin": request.api_base_url.rstrip("/").removesuffix("/v1"),
+                "Referer": request.api_base_url.rstrip("/").removesuffix("/v1") + "/console/playground",
+                "User-Agent": _browser_user_agent(),
                 "Authorization": f"Bearer {request.api_key}",
             },
         )
@@ -239,6 +245,205 @@ class OpenAICompatibleImageTransport:
                 "revisedPromptPresent": bool(item.get("revised_prompt")),
             },
         )
+
+
+class OpenAIChatCompatibleImageTransport:
+    async def generate_image(self, request: ImageGenerationRequest) -> ImageGenerationResult:
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._send_request, request),
+                timeout=request.timeout_seconds + 1.0,
+            )
+        except TimeoutError as exc:
+            raise TransportTimeoutError("The chat image transport timed out.") from exc
+        except (TransportTimeoutError, TransportSchemaError):
+            raise
+        except TransportError:
+            raise
+        except Exception as exc:
+            raise TransportError("The chat image transport failed.") from exc
+
+    def _send_request(self, request: ImageGenerationRequest) -> ImageGenerationResult:
+        prompt_parts = [request.prompt]
+        if request.negative_prompt:
+            prompt_parts.append(f"Negative prompt: {request.negative_prompt}")
+        prompt_parts.append(f"Canvas size: {request.size}. Return one image only.")
+
+        payload: dict[str, object] = {
+            "model": request.model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "\n\n".join(prompt_parts),
+                }
+            ],
+        }
+        if request.group:
+            payload["group"] = request.group
+        if request.seed is not None:
+            payload["seed"] = request.seed
+
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        target_url = request.api_base_url.rstrip("/") + "/chat/completions"
+        http_request = urllib.request.Request(
+            target_url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*",
+                "Origin": request.api_base_url.rstrip("/").removesuffix("/v1"),
+                "Referer": request.api_base_url.rstrip("/").removesuffix("/v1") + "/console/playground",
+                "User-Agent": _browser_user_agent(),
+                "Authorization": f"Bearer {request.api_key}",
+            },
+        )
+
+        try:
+            with urllib.request.urlopen(http_request, timeout=request.timeout_seconds) as response:
+                response_body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            raise TransportError(f"Chat image provider returned HTTP {exc.code}.") from exc
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", exc)
+            if isinstance(reason, TimeoutError):
+                raise TransportTimeoutError("The chat image provider connection timed out.") from exc
+            raise TransportError("The chat image provider connection failed.") from exc
+        except TimeoutError as exc:
+            raise TransportTimeoutError("The chat image provider request timed out.") from exc
+
+        image_ref = _extract_chat_image_reference(response_body)
+        content_bytes = _read_image_reference(image_ref, timeout_seconds=request.timeout_seconds)
+        mime_type = _detect_image_mime_type(content_bytes)
+        if mime_type is None:
+            raise TransportSchemaError("The chat image provider returned bytes with an unsupported mime type.")
+
+        width, height = _parse_image_size(request.size)
+        return ImageGenerationResult(
+            content_bytes=content_bytes,
+            mime_type=mime_type,
+            width=width,
+            height=height,
+            seed=request.seed,
+            provider_metadata={
+                "mode": request.mode,
+                "transport": "openai-chat-compatible",
+                "mimeType": mime_type,
+                "remoteImageUrlPresent": image_ref.startswith("http://") or image_ref.startswith("https://"),
+            },
+        )
+
+
+class DashScopeImageTransport:
+    async def generate_image(self, request: ImageGenerationRequest) -> ImageGenerationResult:
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._send_request, request),
+                timeout=request.timeout_seconds + 1.0,
+            )
+        except TimeoutError as exc:
+            raise TransportTimeoutError("The DashScope image transport timed out.") from exc
+        except (TransportTimeoutError, TransportSchemaError):
+            raise
+        except TransportError:
+            raise
+        except Exception as exc:
+            raise TransportError("The DashScope image transport failed.") from exc
+
+    def _send_request(self, request: ImageGenerationRequest) -> ImageGenerationResult:
+        width, height = _parse_image_size(request.size)
+        prompt_parts = [request.prompt]
+        if request.negative_prompt:
+            prompt_parts.append(f"Negative prompt: {request.negative_prompt}")
+
+        payload: dict[str, object] = {
+            "model": request.model,
+            "input": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"text": "\n".join(prompt_parts)}],
+                    }
+                ]
+            },
+            "parameters": {
+                "size": f"{width}*{height}",
+                "n": 1,
+                "watermark": False,
+            },
+        }
+        if request.seed is not None:
+            payload["parameters"]["seed"] = request.seed  # type: ignore[index]
+
+        body = json.dumps(payload).encode("utf-8")
+        target_url = request.api_base_url.rstrip("/") + "/services/aigc/multimodal-generation/generation"
+        http_request = urllib.request.Request(
+            target_url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {request.api_key}",
+                "X-DashScope-SSE": "disable",
+            },
+        )
+
+        try:
+            with urllib.request.urlopen(http_request, timeout=request.timeout_seconds) as response:
+                response_body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            raise TransportError(f"DashScope image provider returned HTTP {exc.code}.") from exc
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", exc)
+            if isinstance(reason, TimeoutError):
+                raise TransportTimeoutError("The DashScope image provider connection timed out.") from exc
+            raise TransportError("The DashScope image provider connection failed.") from exc
+        except TimeoutError as exc:
+            raise TransportTimeoutError("The DashScope image provider request timed out.") from exc
+
+        try:
+            decoded = json.loads(response_body)
+            request_id = decoded.get("request_id")
+            content = decoded["output"]["choices"][0]["message"]["content"]
+            image_url = _first_dashscope_image_url(content)
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+            raise TransportSchemaError("The DashScope image provider returned an unexpected response envelope.") from exc
+
+        content_bytes = self._download_image(image_url, request.timeout_seconds)
+        mime_type = _detect_image_mime_type(content_bytes)
+        if mime_type is None:
+            raise TransportSchemaError("The DashScope image provider returned bytes with an unsupported mime type.")
+
+        return ImageGenerationResult(
+            content_bytes=content_bytes,
+            mime_type=mime_type,
+            width=width,
+            height=height,
+            seed=request.seed,
+            provider_metadata={
+                "mode": request.mode,
+                "provider": "dashscope",
+                "mimeType": mime_type,
+                "requestId": request_id,
+                "remoteImageUrlPresent": True,
+            },
+        )
+
+    @staticmethod
+    def _download_image(image_url: str, timeout_seconds: float) -> bytes:
+        try:
+            http_request = urllib.request.Request(image_url, method="GET")
+            with urllib.request.urlopen(http_request, timeout=timeout_seconds) as response:
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            raise TransportError(f"DashScope image download returned HTTP {exc.code}.") from exc
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", exc)
+            if isinstance(reason, TimeoutError):
+                raise TransportTimeoutError("The DashScope image download timed out.") from exc
+            raise TransportError("The DashScope image download failed.") from exc
+        except TimeoutError as exc:
+            raise TransportTimeoutError("The DashScope image download timed out.") from exc
 
 
 class OpenAICompatibleLayerTransport:
@@ -367,6 +572,97 @@ def _parse_image_size(size: str) -> tuple[int, int]:
     if width <= 0 or height <= 0:
         raise TransportSchemaError(f"Unsupported image size '{size}'. Width and height must be positive.")
     return width, height
+
+
+def _first_dashscope_image_url(content: object) -> str:
+    if not isinstance(content, list):
+        raise TransportSchemaError("The DashScope image provider returned content in an unsupported format.")
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        image = item.get("image")
+        if isinstance(image, str) and image:
+            return image
+    raise TransportSchemaError("The DashScope image provider did not return an image URL.")
+
+
+def _browser_user_agent() -> str:
+    return (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/137.0.0.0 Safari/537.36"
+    )
+
+
+def _extract_chat_image_reference(response_body: str) -> str:
+    try:
+        decoded = json.loads(response_body)
+        message = decoded["choices"][0]["message"]
+        content = message.get("content")
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        raise TransportSchemaError("The chat image provider returned an unexpected response envelope.") from exc
+
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            image_url = item.get("image_url")
+            if isinstance(image_url, dict) and isinstance(image_url.get("url"), str):
+                return image_url["url"]
+            if isinstance(item.get("url"), str):
+                return item["url"]
+            if isinstance(item.get("image"), str):
+                return item["image"]
+            if isinstance(item.get("b64_json"), str):
+                return f"data:image/png;base64,{item['b64_json']}"
+
+    if isinstance(content, str):
+        data_url_match = re.search(r"data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+", content)
+        if data_url_match:
+            return data_url_match.group(0).replace("\n", "").replace("\r", "")
+
+        markdown_image_match = re.search(r"!\[[^\]]*]\((https?://[^)\s]+)\)", content)
+        if markdown_image_match:
+            return markdown_image_match.group(1)
+
+        url_match = re.search(r"https?://[^\s)\"']+", content)
+        if url_match:
+            return url_match.group(0)
+
+    raise TransportSchemaError("The chat image provider did not return a usable image reference.")
+
+
+def _read_image_reference(image_ref: str, *, timeout_seconds: float) -> bytes:
+    if image_ref.startswith("data:image/"):
+        try:
+            _, encoded = image_ref.split(",", 1)
+            return base64.b64decode(encoded)
+        except (ValueError, TypeError) as exc:
+            raise TransportSchemaError("The chat image provider returned an invalid data URL.") from exc
+
+    if image_ref.startswith("http://") or image_ref.startswith("https://"):
+        http_request = urllib.request.Request(
+            image_ref,
+            method="GET",
+            headers={
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                "User-Agent": _browser_user_agent(),
+            },
+        )
+        try:
+            with urllib.request.urlopen(http_request, timeout=timeout_seconds) as response:
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            raise TransportError(f"Chat image download returned HTTP {exc.code}.") from exc
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", exc)
+            if isinstance(reason, TimeoutError):
+                raise TransportTimeoutError("The chat image download connection timed out.") from exc
+            raise TransportError("The chat image download connection failed.") from exc
+        except TimeoutError as exc:
+            raise TransportTimeoutError("The chat image download timed out.") from exc
+
+    raise TransportSchemaError("The chat image provider returned an unsupported image reference.")
 
 
 def _detect_image_mime_type(content_bytes: bytes) -> str | None:

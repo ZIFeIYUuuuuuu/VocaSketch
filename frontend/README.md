@@ -1,8 +1,16 @@
 # VocaSketch Frontend
 
+## v2 Process Playback
+
+- 如果后端 `playbackManifest.process.version=process-v1`，v2 面板优先使用 canvas 动作播放器，而不是只叠加静态 layer image。
+- 当前动作播放器会按时间轴展示草图、线稿、平涂扩散、阴影 `Layer: Multiply`、光照 `Layer: Add / Glow`、最终 `Eye Spark`。
+- 旧 job 或旧 manifest 没有 `process` 时，仍 fallback 到原来的 layer/frame playback。
+- 播放器只读取后端 final asset 的 `contentUrl` 和 manifest 动作数据；默认 mock/offline 路径不会触发真实外部模型请求。
+
 ## Stage 15 v2 Operation Guards
 
-- The v2 panel guards create, confirm, cancel, and retry with a shared in-flight state so repeated clicks do not send overlapping workflow requests.
+- The v2 panel guards create, cancel, and retry with a shared in-flight state so repeated clicks do not send overlapping workflow requests.
+- The current v2 user path does not show a preview or ask for preview confirmation; any backend confirmation breakpoint is auto-advanced so the user waits for drawing-process frames.
 - Failed jobs only enable retry when the backend snapshot marks `error.retryable=true`.
 - Cancelled and completed jobs are shown as terminal history views; cancelled jobs no longer imply generation is still running.
 - Retry success switches the panel to the new job and keeps the source job visible through `retryOfJobId`.
@@ -23,7 +31,7 @@
 ## Stage 13 v2 Session Restore
 
 - The v2 panel stores the currently viewed drawing job id in browser storage.
-- On page refresh or reopen, the panel restores that job snapshot, reloads preview/final/manifest metadata, and resumes tracking if the job is still active.
+- On page refresh or reopen, the panel restores that job snapshot, reloads final/manifest metadata, and resumes tracking if the job is still active.
 - Completed, failed, or cancelled jobs restore as static history views.
 - The SSE client can reconnect with `afterSeq` so the backend only replays events after the last seen sequence.
 - If the saved job is missing or invalid, the panel clears the saved state and keeps the rest of the app usable.
@@ -34,7 +42,7 @@
 - The v2 drawing panel can now load recent jobs from `GET /api/v2/drawing-jobs`.
 - Recent jobs show status, prompt summary, asset readiness, retry source, and last update time.
 - Clicking a recent job reopens its snapshot; active non-terminal jobs can keep using SSE/polling, while terminal jobs are shown as static history.
-- The panel also reads `GET /api/v2/runtime/readiness` and displays provider profile, runner mode, network mode, and text/preview/final/layer modes.
+- The panel also reads `GET /api/v2/runtime/readiness` and displays provider profile, runner mode, network mode, and text/internal-composition/final/layer modes.
 - The default v2 backend profile remains `mock`; the default frontend path does not trigger real external model requests.
 
 VocaSketch 前端是一个 Vite + React 绘图工作台原型，用于演示语音指令、确认流、绘图阶段、图层面板、局部修改、撤销重做和回放。
@@ -42,9 +50,9 @@ VocaSketch 前端是一个 Vite + React 绘图工作台原型，用于演示语�
 当前版本保留原有 v1 工作台逻辑，并额外提供一条最小化的 v2 drawing job 体验面板：
 
 - v1：语音指令 + Canvas 演示工作台
-- v2：连接 `backend_py` 的 drawing job / SSE / preview / final asset content / layer playback
+- v2：连接 `backend_py` 的 drawing job / SSE / final asset content / 10%-100% 绘画过程帧 playback
 
-当前仍不接入真实外部模型，不会发起真实模型网络请求。
+默认配置仍不接入真实外部模型，不会发起真实模型网络请求；只有显式 live 环境变量启用后才会走真实 provider。
 
 ## 本地启动
 
@@ -59,7 +67,7 @@ npm run dev
 http://localhost:3000
 ```
 
-如果需要联调 Stage 7 的 v2 预览链路，另开一个终端启动 `backend_py`：
+如果需要联调 v2 Python 后端绘画链路，另开一个终端启动 `backend_py`：
 
 ```bash
 cd backend_py
@@ -90,8 +98,8 @@ npm run preview  # 预览构建结果
 - 自动绘画和分阶段确认模式
 - Canvas 二次元水彩头像绘制
 - 最小 v2 drawing job 面板
-- preview / final SVG asset 展示
-- 按 playback manifest 顺序播放 layer assets
+- 完成后展示 final asset 与 10% 草图、25% 线稿、45% 平涂、65% 阴影、85% 光照、100% 完成帧
+- 按 playback manifest 顺序播放 frame/layer assets
 - v2 failed / cancelled / retry 状态提示
 - 语义图层面板
 - 角色属性面板

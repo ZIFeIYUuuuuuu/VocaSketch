@@ -18,12 +18,22 @@ class WorkflowStateError(RuntimeError):
 
 
 class MockDrawingWorkflowService:
-    def __init__(self, store: JobStore, event_bus: JobEventBus, drawing_graph: DrawingGraphRunner, step_delay_seconds: float) -> None:
+    def __init__(
+        self,
+        store: JobStore,
+        event_bus: JobEventBus,
+        drawing_graph: DrawingGraphRunner,
+        step_delay_seconds: float,
+        *,
+        enable_post_preview_precompute: bool = False,
+    ) -> None:
         self._store = store
         self._event_bus = event_bus
         self._drawing_graph = drawing_graph
         self._step_delay_seconds = step_delay_seconds
+        self._enable_post_preview_precompute = enable_post_preview_precompute
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._post_preview_tasks: dict[str, asyncio.Task[None]] = {}
         self._confirm_events: dict[str, asyncio.Event] = {}
 
     async def start_job(self, job_id: str) -> None:
@@ -40,8 +50,22 @@ class MockDrawingWorkflowService:
             if job.status in TERMINAL_JOB_STATUSES:
                 continue
             if job.status == JobStatus.preview_ready and job.requiresConfirmation:
+                self._schedule_post_preview_precompute(job.jobId)
                 continue
             await self.start_job(job.jobId)
+
+    async def shutdown(self) -> None:
+        tasks = [
+            task
+            for task in [*self._tasks.values(), *self._post_preview_tasks.values()]
+            if not task.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+        self._post_preview_tasks.clear()
 
     async def confirm_job(
         self,
@@ -108,6 +132,9 @@ class MockDrawingWorkflowService:
         task = self._tasks.get(job_id)
         if task and not task.done():
             task.cancel()
+        post_preview_task = self._post_preview_tasks.get(job_id)
+        if post_preview_task and not post_preview_task.done():
+            post_preview_task.cancel()
         return job
 
     async def retry_job(
@@ -202,6 +229,7 @@ class MockDrawingWorkflowService:
                 confirmed = await self._wait_for_confirmation(job_id)
                 if not confirmed:
                     return
+            await self._await_post_preview_precompute(job_id)
             job = await self._require_active_job(job_id)
             state = await self._drawing_graph.load_state(job)
 
@@ -277,7 +305,7 @@ class MockDrawingWorkflowService:
         if state.previewAsset is None:
             state = await self._drawing_graph.run_generate_preview(state)
             job.previewAssetId = state.previewAsset.assetId
-            job.requiresConfirmation = True
+            job.requiresConfirmation = not self._enable_post_preview_precompute
             await self._apply_state(job, state)
             job = await self._transition(job, JobStatus.preview_ready, 55)
             if job.status != JobStatus.preview_ready:
@@ -288,6 +316,7 @@ class MockDrawingWorkflowService:
                 JobStatus.preview_ready,
                 state.previewAsset.model_dump(mode="json"),
             )
+            self._schedule_post_preview_precompute(job.jobId)
         return state
 
     async def _advance_to_final_ready(self, job: DrawingJob, state: DrawingWorkflowState) -> DrawingWorkflowState:
@@ -301,7 +330,10 @@ class MockDrawingWorkflowService:
         if state.finalAsset is None:
             state = await self._drawing_graph.run_generate_final_image(state)
             job.finalAssetId = state.finalAsset.assetId
+        if state.finalAsset is not None:
+            job.finalAssetId = state.finalAsset.assetId
             await self._apply_state(job, state)
+        if state.finalAsset is not None and job.status != JobStatus.final_ready:
             job = await self._transition(job, JobStatus.final_ready, 78)
             if job.status != JobStatus.final_ready:
                 return state
@@ -323,7 +355,9 @@ class MockDrawingWorkflowService:
         self._maybe_fail(job, JobStatus.layers_generating)
         if not state.layerAssets:
             state = await self._drawing_graph.run_decompose_layers(state)
+        if state.layerAssets:
             await self._apply_state(job, state)
+        if state.layerAssets and job.status != JobStatus.layers_ready:
             job = await self._transition(job, JobStatus.layers_ready, 92)
             if job.status != JobStatus.layers_ready:
                 return state
@@ -343,7 +377,11 @@ class MockDrawingWorkflowService:
             job.playbackManifestAssetId = (
                 state.playbackManifestAsset.assetId if state.playbackManifestAsset is not None else None
             )
+        if state.playbackManifest is not None:
+            if state.playbackManifestAsset is not None:
+                job.playbackManifestAssetId = state.playbackManifestAsset.assetId
             await self._apply_state(job, state)
+        if state.playbackManifest is not None and job.status != JobStatus.playback_ready:
             job = await self._transition(job, JobStatus.playback_ready, 97)
             if job.status != JobStatus.playback_ready:
                 return state
@@ -370,6 +408,56 @@ class MockDrawingWorkflowService:
                 },
             )
         return state
+
+    def _schedule_post_preview_precompute(self, job_id: str) -> None:
+        if not self._enable_post_preview_precompute:
+            return
+        task = self._post_preview_tasks.get(job_id)
+        if task and not task.done():
+            return
+        task = asyncio.create_task(self._precompute_after_preview(job_id), name=f"drawing-job-precompute:{job_id}")
+        self._post_preview_tasks[job_id] = task
+        task.add_done_callback(lambda _: self._post_preview_tasks.pop(job_id, None))
+
+    async def _await_post_preview_precompute(self, job_id: str) -> None:
+        task = self._post_preview_tasks.get(job_id)
+        if task and not task.done():
+            await task
+
+    async def _precompute_after_preview(self, job_id: str) -> None:
+        try:
+            job = await self._require_active_job(job_id)
+            if job.status != JobStatus.preview_ready:
+                return
+            state = await self._drawing_graph.load_state(job)
+
+            if state.finalAsset is None:
+                state = await self._drawing_graph.run_generate_final_image(state)
+                job = await self._require_active_job(job_id)
+                if job.status != JobStatus.preview_ready:
+                    return
+                job.finalAssetId = state.finalAsset.assetId
+                await self._apply_state(job, state)
+
+            if not state.layerAssets:
+                state = await self._drawing_graph.run_decompose_layers(state)
+                job = await self._require_active_job(job_id)
+                if job.status != JobStatus.preview_ready:
+                    return
+                await self._apply_state(job, state)
+
+            if state.playbackManifest is None:
+                state = await self._drawing_graph.run_build_playback_manifest(state)
+                job = await self._require_active_job(job_id)
+                if job.status != JobStatus.preview_ready:
+                    return
+                if state.playbackManifestAsset is not None:
+                    job.playbackManifestAssetId = state.playbackManifestAsset.assetId
+                await self._apply_state(job, state)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._mark_failed(job_id, exc)
 
     async def _apply_state(self, job: DrawingJob, state: DrawingWorkflowState) -> None:
         current = await self._store.get_job(job.jobId)

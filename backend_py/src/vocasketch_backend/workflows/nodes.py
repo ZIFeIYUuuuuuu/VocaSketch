@@ -12,6 +12,7 @@ from ..providers.base import (
     VisualBriefProvider,
     WorkflowNodeError,
 )
+from ..providers.process_playback import enrich_manifest_with_process
 from .state import DrawingWorkflowState
 
 
@@ -89,6 +90,7 @@ async def build_playback_manifest_node(
 ) -> DrawingWorkflowState:
     try:
         playback_manifest = await provider.build_playback_manifest(state)
+        playback_manifest = enrich_manifest_with_process(playback_manifest, final_asset=state.finalAsset)
         manifest_asset = await asset_store.save_playback_manifest(state.jobId, playback_manifest)
     except ProviderError as exc:
         raise WorkflowNodeError("build_playback_manifest_node", str(exc), cause=exc) from exc

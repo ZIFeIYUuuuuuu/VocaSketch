@@ -1,5 +1,17 @@
 # VocaSketch Python v2 Backend
 
+## Process Playback Manifest
+
+- `build_playback_manifest_node` 会在保存 manifest 前补充 `process-v1` 动作时间轴。
+- `process` 不保存 mp4，也不把大块 mask/envelope 写进 JSON；它只描述前端可消费的轻量动作：
+  - `stroke`: 草图/线稿笔迹生长
+  - `fillRegion`: 平涂区域中心扩散
+  - `maskReveal`: 阴影/光照蒙版式显现
+  - `layerBadge`: `Layer: Multiply` / `Layer: Add / Glow`
+  - `eyeSpark`: 最终眼神高光点睛
+- 前端使用同一张 final image 结合 canvas/filter/mask 来播放过程，因此角色和构图不会在阶段之间漂移。
+- 默认 provider profile 仍是 `mock`；process playback 生成不联网，也不调用真实外部模型。
+
 ## Stage 15 Cancel / Retry / Timeout Consistency
 
 - Active jobs can be cancelled; cancelled jobs are terminal and should not later advance to preview, final, layers, playback, or completed.
@@ -71,7 +83,7 @@
   - 当前 provider profile
   - `allowLiveRequests`
   - `networkEnabled` / `configured` / `placeholder`
-  - text / preview / final / layers / playback 当前是 `mock`、`live` 还是 `placeholder`
+  - text / preview / final / layers / playback 当前是 `mock`、`live`、`derived` 还是 `placeholder`
   - data / jobs / assets 目录是否存在、启动阶段是否确认可写
   - LangGraph 是否可用、当前 runner mode
 - readiness 不会输出：
@@ -137,21 +149,25 @@
 ## Stage 9 Image Provider 层
 
 - 默认 provider profile 仍是 `mock`
-- 默认运行路径仍不联网，preview / final 继续生成本地 SVG mock asset
+- 默认运行路径仍不联网，内部构图 / final 继续生成本地 SVG mock asset
 - `openai` profile 现在支持更细的 mixed mode：
   - `live text + mock image`
   - `live text + live image`
-- 只有在同时满足以下条件时，preview / final 才会启用真实 image transport：
+- 只有在同时满足以下条件时，内部构图 / final 才会启用真实 image transport：
   - `VOCASKETCH_PROVIDER_PROFILE=openai`
   - `VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS=1`
   - `VOCASKETCH_OPENAI_API_BASE_URL` 已配置
   - `VOCASKETCH_OPENAI_API_KEY` 已配置
   - `VOCASKETCH_OPENAI_RESPONSE_MODEL` 已配置
   - `VOCASKETCH_OPENAI_IMAGE_MODEL` 已配置
-- 如果只配置了 live text，但没有 `imageModel`，系统会继续走 `live text + mock image`，这样前端仍能拿到完整 preview/final 闭环
+- 如果生图模型使用不同的 OpenAI-compatible 网关或 key，可以额外配置：
+  - `VOCASKETCH_OPENAI_IMAGE_API_BASE_URL`
+  - `VOCASKETCH_OPENAI_IMAGE_API_KEY`
+  这两个变量只覆盖内部构图 / final 生图请求；文本节点仍使用 `VOCASKETCH_OPENAI_API_BASE_URL` / `VOCASKETCH_OPENAI_API_KEY`。
+- 如果只配置了 live text，但没有 `imageModel`，系统会继续走 `live text + mock image`，这样前端仍能拿到完整 final/frames 闭环
 - image transport 当前只建立了 OpenAI-compatible endpoint 边界与 fake transport 测试，不作为默认路径启用
 - live image asset 会以 `png` / `jpeg` / `webp` 等真实图片 bytes 落盘，并继续复用同一个 `contentUrl`
-- layer decomposition / playback 仍然是 mock，不是真实图层分解
+- 如果没有配置 live layer provider，layer decomposition / playback 会从同一张 final 图派生 10% 到 100% 的过程帧，避免回退到独立 mock 占位图
 - fake transport 测试不发真实网络请求
 
 ## Stage 8 文本 LLM Provider 层
@@ -162,7 +178,7 @@
   - `parse_intent`
   - `build_visual_brief`
   - `build_image_prompt`
-- preview / final 默认仍走本地 mock SVG asset provider；Stage 9 中可以在显式开启时切到 live image transport
+- 内部构图 / final 默认仍走本地 mock SVG asset provider；Stage 9 中可以在显式开启时切到 live image transport
 - 这意味着当前是可选的 mixed mode：
   - live text intelligence
   - local mock image assets，或在显式开启后使用 live preview/final image
@@ -172,7 +188,7 @@
 
 - `GET /api/v2/assets/{assetId}` 继续返回资产 metadata
 - 新增 `GET /api/v2/assets/{assetId}/content` 返回实际内容文件
-- preview / final / layer asset 现在会落本地内容文件，并提供稳定 `contentUrl`
+- 内部构图 / final / layer asset 现在会落本地内容文件，并提供稳定 `contentUrl`
 - 默认 mock provider 生成的是本地 SVG 占位图，`mimeType=image/svg+xml`
 - Stage 9 live image path 会把真实图片 bytes 落地为 `png` / `jpeg` / `webp` 文件，并复用相同的 metadata / content contract
 - playback manifest 也会落成本地 JSON 文件，便于调试和前端读取
@@ -192,7 +208,7 @@
   - 公共配置齐全但未显式开启 live 请求时，应用可启动，但 job 会在执行节点时明确返回 `ProviderError`
   - 只有 `openai` profile 在显式 live 开关开启后，才会进入 mixed mode
   - 未配置 `imageModel`：真实文本节点 + mock 资产
-  - 配置 `imageModel`：真实文本节点 + 真实 preview/final image + mock layers/playback
+  - 配置 `imageModel`：真实文本节点 + 真实内部构图/final image + derived frames/playback
 - route 层和 workflow service 层都不感知具体 provider 类型，只依赖统一的 `ProviderGateway`
 
 ## Stage 4 编排层
@@ -346,8 +362,8 @@ http://127.0.0.1:8000
 - 但当前 mock retry 仍然会从 `queued` 全量重跑，不会从指定 phase 局部恢复
 - 当前 workflow 内部已按节点拆分
 - 当前即使使用 LangGraph-backed runner，playback 仍由 workflow service 保持节点级状态推进
-- 当前 preview / final 默认仍由本地 SVG mock asset 提供；只有显式 live image 配置齐全时才会请求 image transport
-- 当前 layers 默认仍由本地 SVG mock provider 提供；只有显式 live layer 配置齐全时才会请求 layer transport
+- 当前内部构图 / final 默认仍由本地 SVG mock asset 提供；只有显式 live image 配置齐全时才会请求 image transport
+- 当前 live image 但未配置 live layer 时，layers/playback 会从同一张 final 图派生；只有显式 live layer 配置齐全时才会请求 layer transport
 - 当前默认 profile 仍不会发真实请求
 - 当前 `openai` profile 只有显式 live 开关开启时，才会让文本节点与可选 image / layer 节点发起真实请求；自动化测试不会这样做
 - 不要把 API key 写入代码、日志、事件 payload、job metadata 或 README 示例
@@ -368,7 +384,10 @@ curl -X POST http://127.0.0.1:8000/api/v2/drawing-jobs ^
 curl http://127.0.0.1:8000/api/v2/drawing-jobs/<jobId>/events
 ```
 
-3. 当状态到达 `preview_ready` 后确认继续
+3. 等待 job 完成
+
+前端主流程不会展示内部构图，也不会要求用户确认；live image 模式会在内部构图完成后自动继续生成 final 与 10% 到 100% 的绘画过程帧。
+如果使用旧 mock/兼容测试路径，`confirm` API 仍可手动推进 `preview_ready` 断点。
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v2/drawing-jobs/<jobId>/confirm ^

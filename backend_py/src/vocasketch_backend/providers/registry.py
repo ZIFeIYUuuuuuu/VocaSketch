@@ -15,8 +15,10 @@ from .placeholders import (
     build_placeholder_runtime_info,
 )
 from .transports import (
+    DashScopeImageTransport,
     ImageGenerationTransport,
     LayerDecompositionTransport,
+    OpenAIChatCompatibleImageTransport,
     OpenAICompatibleImageTransport,
     OpenAICompatibleLayerTransport,
     OpenAICompatibleTextTransport,
@@ -54,6 +56,10 @@ def create_provider_gateway(config: ProviderConfig) -> ProviderBuildResult:
                 api_base_url=config.openai.apiBaseUrl or "",
                 safe_api_base_url=_sanitize_url(config.openai.apiBaseUrl),
                 api_key=config.openai.apiKey or "",
+                image_api_base_url=config.openai.imageApiBaseUrl or config.openai.apiBaseUrl or "",
+                safe_image_api_base_url=_sanitize_url(config.openai.imageApiBaseUrl or config.openai.apiBaseUrl),
+                image_api_key=config.openai.imageApiKey or config.openai.apiKey or "",
+                image_group=config.openai.imageGroup,
                 text_model=config.openai.responseModel or "",
                 image_model=config.openai.imageModel,
                 layer_model=config.openai.layerModel,
@@ -71,6 +77,9 @@ def create_provider_gateway(config: ProviderConfig) -> ProviderBuildResult:
                 provider_name="openai-placeholder",
                 safe_settings={
                     "apiBaseUrl": _sanitize_url(config.openai.apiBaseUrl),
+                    "imageApiBaseUrl": _sanitize_url(config.openai.imageApiBaseUrl or config.openai.apiBaseUrl),
+                    "imageTransport": config.openai.imageTransport,
+                    "imageGroup": config.openai.imageGroup,
                     "responseModel": config.openai.responseModel,
                     "imageModel": config.openai.imageModel,
                     "layerModel": config.openai.layerModel,
@@ -157,6 +166,10 @@ def build_openai_text_transport(config: ProviderConfig) -> TextGenerationTranspo
 
 
 def build_openai_image_transport(config: ProviderConfig) -> ImageGenerationTransport:
+    if config.openai.imageTransport == "dashscope":
+        return DashScopeImageTransport()
+    if config.openai.imageTransport == "openai-chat-compatible":
+        return OpenAIChatCompatibleImageTransport()
     return OpenAICompatibleImageTransport()
 
 

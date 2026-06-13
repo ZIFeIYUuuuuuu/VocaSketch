@@ -253,6 +253,105 @@ export interface PlaybackManifestStep {
   assetRole?: string | null;
 }
 
+export type PlaybackProcessAction =
+  | {
+      id: string;
+      type: 'stroke';
+      phase: string;
+      label: string;
+      startMs: number;
+      durationMs: number;
+      tool: string;
+      points: Array<{ x: number; y: number }>;
+      strokeWidth: number;
+      color: string;
+      opacity: number;
+      speedProfile?: string;
+    }
+  | {
+      id: string;
+      type: 'fillRegion';
+      phase: string;
+      label: string;
+      startMs: number;
+      durationMs: number;
+      tool: string;
+      center: { x: number; y: number };
+      radius: { x: number; y: number };
+      color: string;
+      opacity: number;
+      edgeFeather?: number;
+      reveal?: string;
+    }
+  | {
+      id: string;
+      type: 'maskReveal';
+      phase: string;
+      label: string;
+      startMs: number;
+      durationMs: number;
+      tool: string;
+      blendMode: string;
+      opacity: number;
+      direction?: string;
+      filter?: string;
+    }
+  | {
+      id: string;
+      type: 'layerBadge';
+      phase: string;
+      label: string;
+      startMs: number;
+      durationMs: number;
+      blendMode?: string;
+    }
+  | {
+      id: string;
+      type: 'finalReveal';
+      phase: string;
+      label: string;
+      startMs: number;
+      durationMs: number;
+      tool: string;
+    }
+  | {
+      id: string;
+      type: 'eyeSpark';
+      phase: string;
+      label: string;
+      startMs: number;
+      durationMs: number;
+      tool: string;
+      points: Array<{ x: number; y: number }>;
+      color: string;
+      opacity: number;
+    };
+
+export interface PlaybackProcessPhase {
+  role: string;
+  label: string;
+  progressPercent: number;
+  startMs: number;
+  durationMs: number;
+}
+
+export interface PlaybackProcess {
+  version: string;
+  style: string;
+  renderer: string;
+  source: {
+    finalAssetId: string;
+    finalContentUrl: string;
+    mimeType: string;
+    width: number;
+    height: number;
+    mode: string;
+  };
+  phases: PlaybackProcessPhase[];
+  actions: PlaybackProcessAction[];
+  ui?: Record<string, unknown>;
+}
+
 export interface PlaybackManifest {
   manifestVersion: string;
   canvasSize: {
@@ -263,6 +362,7 @@ export interface PlaybackManifest {
   steps: PlaybackManifestStep[];
   layerRefs: string[];
   finalCompositeAssetId?: string | null;
+  process?: PlaybackProcess | null;
 }
 
 export interface JobError {

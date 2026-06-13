@@ -15,6 +15,10 @@ class ProviderConfigError(ValueError):
 class OpenAIProviderConfig(BaseModel):
     apiBaseUrl: str | None = None
     apiKey: str | None = None
+    imageApiBaseUrl: str | None = None
+    imageApiKey: str | None = None
+    imageTransport: str = "openai-compatible"
+    imageGroup: str | None = None
     responseModel: str | None = None
     imageModel: str | None = None
     layerModel: str | None = None
@@ -72,12 +76,22 @@ def get_provider_config() -> ProviderConfig:
         openai_config = OpenAIProviderConfig(
             apiBaseUrl=_optional_env("VOCASKETCH_OPENAI_API_BASE_URL"),
             apiKey=_optional_env("VOCASKETCH_OPENAI_API_KEY"),
+            imageApiBaseUrl=_optional_env("VOCASKETCH_OPENAI_IMAGE_API_BASE_URL"),
+            imageApiKey=_optional_env("VOCASKETCH_OPENAI_IMAGE_API_KEY"),
+            imageTransport=os.getenv("VOCASKETCH_OPENAI_IMAGE_TRANSPORT", "openai-compatible").strip().lower(),
+            imageGroup=_optional_env("VOCASKETCH_OPENAI_IMAGE_GROUP"),
             responseModel=_optional_env("VOCASKETCH_OPENAI_RESPONSE_MODEL"),
             imageModel=_optional_env("VOCASKETCH_OPENAI_IMAGE_MODEL"),
             layerModel=_optional_env("VOCASKETCH_OPENAI_LAYER_MODEL"),
             timeoutSeconds=_parse_positive_float_env("VOCASKETCH_OPENAI_TIMEOUT_SECONDS", default=20.0),
         )
         _validate_optional_http_url("VOCASKETCH_OPENAI_API_BASE_URL", openai_config.apiBaseUrl)
+        _validate_optional_http_url("VOCASKETCH_OPENAI_IMAGE_API_BASE_URL", openai_config.imageApiBaseUrl)
+        _validate_choice(
+            "VOCASKETCH_OPENAI_IMAGE_TRANSPORT",
+            openai_config.imageTransport,
+            {"openai-compatible", "openai-chat-compatible", "dashscope"},
+        )
         return config.model_copy(update={"openai": openai_config})
 
     if profile == ProviderProfile.dashscope:
@@ -129,3 +143,9 @@ def _validate_optional_http_url(name: str, value: str | None) -> None:
     parts = urlsplit(value)
     if parts.scheme not in {"http", "https"} or not parts.netloc:
         raise ProviderConfigError(f"{name} must be an absolute http(s) URL.")
+
+
+def _validate_choice(name: str, value: str, supported: set[str]) -> None:
+    if value not in supported:
+        expected = ", ".join(sorted(supported))
+        raise ProviderConfigError(f"{name} must be one of: {expected}.")
