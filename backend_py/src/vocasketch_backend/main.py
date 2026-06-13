@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +14,7 @@ from .providers.config import get_provider_config
 from .providers.registry import create_provider_gateway
 from .routes.assets import router as assets_router
 from .routes.drawing_jobs import router as drawing_jobs_router
+from .routes.runtime import router as runtime_router
 from .workflow import MockDrawingWorkflowService
 from .workflows.drawing_graph import DrawingGraphRunner
 
@@ -40,8 +42,14 @@ def create_app() -> FastAPI:
         )
 
         await store.ensure_ready()
+        storage_readiness = {
+            "dataDir": _directory_summary(config.data_dir),
+            "jobsDir": _directory_summary(config.jobs_dir),
+            "assetsDir": _directory_summary(config.assets_dir),
+        }
 
         app.state.config = config
+        app.state.storage_readiness = storage_readiness
         app.state.job_store = store
         app.state.asset_store = asset_store
         app.state.provider_config = provider_config
@@ -70,7 +78,30 @@ def create_app() -> FastAPI:
 
     app.include_router(drawing_jobs_router)
     app.include_router(assets_router)
+    app.include_router(runtime_router)
     return app
 
 
 app = create_app()
+
+
+def _directory_summary(path: Path) -> dict[str, object]:
+    return {
+        "name": path.name,
+        "exists": path.exists(),
+        "isDirectory": path.is_dir(),
+        "writable": _is_writable_directory(path),
+    }
+
+
+def _is_writable_directory(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    try:
+        probe = path / ".startup_readiness_probe"
+        with probe.open("w", encoding="utf-8") as handle:
+            handle.write("ok")
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False

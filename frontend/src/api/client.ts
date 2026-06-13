@@ -6,14 +6,17 @@ import type {
   ConfirmCommandResponse,
   DrawingJob,
   DrawingJobCreatedEnvelope,
+  DrawingJobListResponse,
   DrawingJobRetryResponse,
   JobEvent,
+  JobStatus,
   CommandInterpretation,
   InterpretCommandRequest,
   ProjectHistoryResponse,
   ProjectSnapshotRequest,
   ProjectSnapshotResponse,
   ProjectUndoRedoResponse,
+  RuntimeReadiness,
   TtsResponse
 } from './types';
 
@@ -210,6 +213,18 @@ export async function getDrawingJob(jobId: string): Promise<DrawingJob> {
   return v2ApiRequest(`/drawing-jobs/${encodeURIComponent(jobId)}`);
 }
 
+export async function listDrawingJobs(options: { limit?: number; status?: JobStatus } = {}): Promise<DrawingJobListResponse> {
+  const params = new URLSearchParams();
+  if (options.limit) {
+    params.set('limit', String(options.limit));
+  }
+  if (options.status) {
+    params.set('status', options.status);
+  }
+  const query = params.toString() ? `?${params.toString()}` : '';
+  return v2ApiRequest(`/drawing-jobs${query}`);
+}
+
 export async function confirmDrawingJob(
   jobId: string,
   payload?: {
@@ -255,6 +270,10 @@ export async function retryDrawingJob(
 
 export async function getAssetMetadata(assetId: string): Promise<AssetRecord> {
   return v2ApiRequest(`/assets/${encodeURIComponent(assetId)}`);
+}
+
+export async function getRuntimeReadiness(): Promise<RuntimeReadiness> {
+  return v2ApiRequest('/runtime/readiness');
 }
 
 export function buildAssetContentUrl(assetOrAssetId: string | { assetId: string; contentUrl?: string | null }): string {

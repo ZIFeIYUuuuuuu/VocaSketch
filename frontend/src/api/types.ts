@@ -303,6 +303,34 @@ export interface DrawingJob {
   eventsUrl: string;
 }
 
+export interface JobErrorSummary {
+  code: string;
+  phase: JobStatus;
+  message: string;
+  retryable: boolean;
+  provider?: string | null;
+}
+
+export interface DrawingJobSummary {
+  jobId: string;
+  status: JobStatus;
+  progressPercent: number;
+  inputText: string;
+  previewAssetId?: string | null;
+  finalAssetId?: string | null;
+  retryOfJobId?: string | null;
+  error?: JobErrorSummary | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+}
+
+export interface DrawingJobListResponse {
+  items: DrawingJobSummary[];
+  limit: number;
+  status?: JobStatus | null;
+}
+
 export interface DrawingJobCreatedEnvelope {
   jobId: string;
   status: JobStatus;
@@ -336,4 +364,41 @@ export interface JobEvent {
   status: JobStatus;
   payload: Record<string, unknown>;
   timestamp: string;
+}
+
+export interface RuntimeReadiness {
+  status: 'ready' | string;
+  app: {
+    name: string;
+    version: string;
+  };
+  provider: {
+    profile: string;
+    providerName: string;
+    allowLiveRequests: boolean;
+    networkEnabled: boolean;
+    configured: boolean;
+    placeholder: boolean;
+    capabilities: {
+      preview: boolean;
+      final: boolean;
+      layerDecomposition: boolean;
+      playbackManifest: boolean;
+    };
+    modes: {
+      text: string;
+      preview: string;
+      final: string;
+      layers: string;
+      playback: string;
+    };
+    safeSettings?: Record<string, unknown>;
+  };
+  storage: Record<string, unknown>;
+  workflow: {
+    runnerMode: string;
+    usesLangGraph: boolean;
+    langGraphAvailable: boolean;
+    langGraphDisabled: boolean;
+  };
 }
