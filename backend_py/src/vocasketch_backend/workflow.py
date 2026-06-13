@@ -425,6 +425,13 @@ class MockDrawingWorkflowService:
                 "jobId": job.jobId,
                 "status": job.status,
                 "progressPercent": job.progressPercent,
+                "error": {
+                    "code": error.code,
+                    "phase": error.phase,
+                    "retryable": error.retryable,
+                    "provider": error.provider,
+                    "details": error.details,
+                },
             },
         )
         await self._event_bus.publish(

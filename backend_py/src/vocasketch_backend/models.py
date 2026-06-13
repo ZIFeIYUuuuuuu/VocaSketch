@@ -193,6 +193,34 @@ class DrawingJobResponse(DrawingJob):
     eventsUrl: str
 
 
+class JobErrorSummary(BaseModel):
+    code: str
+    phase: JobStatus
+    message: str
+    retryable: bool
+    provider: str | None = None
+
+
+class DrawingJobSummary(BaseModel):
+    jobId: str
+    status: JobStatus
+    progressPercent: int = Field(ge=0, le=100)
+    inputText: str
+    previewAssetId: str | None = None
+    finalAssetId: str | None = None
+    retryOfJobId: str | None = None
+    error: JobErrorSummary | None = None
+    createdAt: datetime
+    updatedAt: datetime
+    completedAt: datetime | None = None
+
+
+class DrawingJobListResponse(BaseModel):
+    items: list[DrawingJobSummary]
+    limit: int
+    status: JobStatus | None = None
+
+
 class DrawingJobConfirmRequest(BaseModel):
     decision: Literal["approve"] = "approve"
     selectedPreviewAssetId: str | None = None

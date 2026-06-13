@@ -1,5 +1,13 @@
 # VocaSketch Frontend
 
+## Stage 12 v2 Panel Continuity
+
+- The v2 drawing panel can now load recent jobs from `GET /api/v2/drawing-jobs`.
+- Recent jobs show status, prompt summary, asset readiness, retry source, and last update time.
+- Clicking a recent job reopens its snapshot; active non-terminal jobs can keep using SSE/polling, while terminal jobs are shown as static history.
+- The panel also reads `GET /api/v2/runtime/readiness` and displays provider profile, runner mode, network mode, and text/preview/final/layer modes.
+- The default v2 backend profile remains `mock`; the default frontend path does not trigger real external model requests.
+
 VocaSketch 前端是一个 Vite + React 绘图工作台原型，用于演示语音指令、确认流、绘图阶段、图层面板、局部修改、撤销重做和回放。
 
 当前版本保留原有 v1 工作台逻辑，并额外提供一条最小化的 v2 drawing job 体验面板：
@@ -55,9 +63,21 @@ npm run preview  # 预览构建结果
 - 最小 v2 drawing job 面板
 - preview / final SVG asset 展示
 - 按 playback manifest 顺序播放 layer assets
+- v2 failed / cancelled / retry 状态提示
 - 语义图层面板
 - 角色属性面板
 - 撤销、重做、暂停、继续、回放和导出入口
+
+## v2 失败、取消与重试体验
+
+- failed 状态会显示后端返回的安全错误摘要：
+  - error code
+  - phase
+  - retryable
+- 只有 `retryable=true` 的 failed job 才会启用重试按钮
+- retry 成功后会显示新 job id 与来源 job id
+- cancelled / completed 状态会显示稳定提示，并禁用不适用的取消或重试操作
+- SSE 断开时仍会切到 polling fallback，job snapshot 与事件状态保持一致
 
 ## 后续接入
 

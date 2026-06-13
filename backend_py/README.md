@@ -1,5 +1,17 @@
 # VocaSketch Python v2 Backend
 
+## Stage 12 Recent Jobs / Runtime Visibility
+
+- `GET /api/v2/drawing-jobs` returns a lightweight recent-job list for the v2 panel.
+- Query params:
+  - `limit`: 1-50, default 10
+  - `status`: optional `JobStatus` filter, for example `failed` or `completed`
+- List items intentionally exclude large fields such as `layerAssets`, `playbackManifest`, `parsedIntent`, `visualBrief`, and `imagePrompt`.
+- Failed job summaries include only safe error fields: `code`, `phase`, `message`, `retryable`, and `provider`.
+- Error text is redacted before list output so API keys, bearer tokens, authorization values, and URL query secrets are not exposed.
+- `GET /api/v2/runtime/readiness` is still the safe read-only endpoint for provider profile, offline/live/placeholder mode, storage summary, and graph runner mode.
+- The default provider profile remains `mock`; the default runtime path does not make real external model requests.
+
 `backend_py/` 是 VocaSketch 的 Python-first v2 后端骨架。它不替换现有 `backend/`，而是为后续 AI 绘图链路提供独立的 FastAPI + SSE + 异步 Drawing Job 基础设施。
 
 ## 当前阶段能力
@@ -14,7 +26,40 @@
 - File-backed asset content 层
 - `preview_ready` 断点确认
 - `confirm` / `cancel` / `retry` 基础控制
+- Runtime readiness / provider mode 只读信息
+- 更明确的 provider 配置校验与 job failed 事件观测信息
 - 为未来 LangGraph 编排预留清晰模块边界
+
+## Stage 11 Runtime Readiness / Config / Observability
+
+- 新增只读 readiness endpoint：
+  - `GET /api/v2/runtime/readiness`
+- readiness 会返回安全摘要：
+  - 当前 provider profile
+  - `allowLiveRequests`
+  - `networkEnabled` / `configured` / `placeholder`
+  - text / preview / final / layers / playback 当前是 `mock`、`live` 还是 `placeholder`
+  - data / jobs / assets 目录是否存在、启动阶段是否确认可写
+  - LangGraph 是否可用、当前 runner mode
+- readiness 不会输出：
+  - API key
+  - Authorization header
+  - secret query 原文
+  - 完整 provider envelope
+  - 本机完整 data path
+- 默认 `mock` profile 会明确显示 offline/mock，不会联网
+- readiness GET 本身不做写盘探针，只返回启动阶段缓存的 storage 摘要
+- OpenAI 配置错误现在会以 `ProviderConfigError` 给出稳定语义：
+  - `VOCASKETCH_OPENAI_TIMEOUT_SECONDS` 必须是正数
+  - 如果提供 `VOCASKETCH_OPENAI_API_BASE_URL`，必须是绝对 `http(s)` URL
+  - 默认 mock profile 不会被外部脏 OpenAI env 破坏
+- job failed 事件会包含安全定位信息：
+  - `code`
+  - `phase`
+  - `provider`
+  - `retryable`
+  - `details.node` 或其他非 secret 细节
+- failed event 不包含 stack trace、API key、raw provider payload
 
 ## Stage 10 Layer Decomposition / Playback
 
@@ -260,6 +305,7 @@ http://127.0.0.1:8000
 - `POST /api/v2/drawing-jobs/{jobId}/retry`
 - `GET /api/v2/assets/{assetId}`
 - `GET /api/v2/assets/{assetId}/content`
+- `GET /api/v2/runtime/readiness`
 
 说明：
 
