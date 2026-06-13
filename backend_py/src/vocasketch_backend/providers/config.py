@@ -16,6 +16,7 @@ class OpenAIProviderConfig(BaseModel):
     apiKey: str | None = None
     responseModel: str | None = None
     imageModel: str | None = None
+    layerModel: str | None = None
     timeoutSeconds: float = 20.0
 
 
@@ -69,6 +70,7 @@ def get_provider_config() -> ProviderConfig:
             apiKey=_optional_env("VOCASKETCH_OPENAI_API_KEY"),
             responseModel=_optional_env("VOCASKETCH_OPENAI_RESPONSE_MODEL"),
             imageModel=_optional_env("VOCASKETCH_OPENAI_IMAGE_MODEL"),
+            layerModel=_optional_env("VOCASKETCH_OPENAI_LAYER_MODEL"),
             timeoutSeconds=float(os.getenv("VOCASKETCH_OPENAI_TIMEOUT_SECONDS", "20")),
         ),
         dashscope=DashScopeProviderConfig(

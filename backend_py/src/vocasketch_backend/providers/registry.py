@@ -14,7 +14,14 @@ from .placeholders import (
     OpenAIProviderGateway,
     build_placeholder_runtime_info,
 )
-from .transports import OpenAICompatibleTextTransport, TextGenerationTransport
+from .transports import (
+    ImageGenerationTransport,
+    LayerDecompositionTransport,
+    OpenAICompatibleImageTransport,
+    OpenAICompatibleLayerTransport,
+    OpenAICompatibleTextTransport,
+    TextGenerationTransport,
+)
 
 
 @dataclass(frozen=True)
@@ -49,8 +56,11 @@ def create_provider_gateway(config: ProviderConfig) -> ProviderBuildResult:
                 api_key=config.openai.apiKey or "",
                 text_model=config.openai.responseModel or "",
                 image_model=config.openai.imageModel,
+                layer_model=config.openai.layerModel,
                 timeout_seconds=config.openai.timeoutSeconds,
                 text_transport=build_openai_text_transport(config),
+                image_transport=build_openai_image_transport(config) if config.openai.imageModel else None,
+                layer_transport=build_openai_layer_transport(config) if config.openai.layerModel else None,
                 asset_provider=MockProviderGateway(),
             )
             return ProviderBuildResult(gateway=gateway, runtime_info=gateway.runtime_info)
@@ -63,6 +73,7 @@ def create_provider_gateway(config: ProviderConfig) -> ProviderBuildResult:
                     "apiBaseUrl": _sanitize_url(config.openai.apiBaseUrl),
                     "responseModel": config.openai.responseModel,
                     "imageModel": config.openai.imageModel,
+                    "layerModel": config.openai.layerModel,
                     "allowLiveRequests": False,
                 },
             )
@@ -143,6 +154,14 @@ def _require_fields(*, profile: ProviderProfile, required: dict[str, str | None]
 
 def build_openai_text_transport(config: ProviderConfig) -> TextGenerationTransport:
     return OpenAICompatibleTextTransport()
+
+
+def build_openai_image_transport(config: ProviderConfig) -> ImageGenerationTransport:
+    return OpenAICompatibleImageTransport()
+
+
+def build_openai_layer_transport(config: ProviderConfig) -> LayerDecompositionTransport:
+    return OpenAICompatibleLayerTransport()
 
 
 def _require_live_fields(*, profile: ProviderProfile, required: dict[str, str | None]) -> None:

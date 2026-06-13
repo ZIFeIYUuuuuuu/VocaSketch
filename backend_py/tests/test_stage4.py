@@ -31,6 +31,13 @@ class Stage4BackendTests(unittest.TestCase):
         env_patch = {
             "VOCASKETCH_BACKEND_PY_DATA_DIR": tempdir.name,
             "VOCASKETCH_WORKFLOW_STEP_DELAY_SECONDS": "0.02",
+            "VOCASKETCH_PROVIDER_PROFILE": "mock",
+            "VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS": "0",
+            "VOCASKETCH_OPENAI_API_BASE_URL": "",
+            "VOCASKETCH_OPENAI_API_KEY": "",
+            "VOCASKETCH_OPENAI_RESPONSE_MODEL": "",
+            "VOCASKETCH_OPENAI_IMAGE_MODEL": "",
+            "VOCASKETCH_OPENAI_LAYER_MODEL": "",
         }
         if disable_langgraph:
             env_patch["VOCASKETCH_DISABLE_LANGGRAPH"] = "1"

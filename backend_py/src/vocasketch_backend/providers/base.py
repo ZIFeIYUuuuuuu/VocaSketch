@@ -65,6 +65,10 @@ class GeneratedAssetSpec:
     mime_type: str
     width: int
     height: int
+    order: int | None = None
+    opacity: float | None = None
+    blend_mode: str | None = None
+    source_final_asset_id: str | None = None
     storage_path: str | None = None
     content_bytes: bytes | None = None
     file_extension: str | None = None

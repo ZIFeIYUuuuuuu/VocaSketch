@@ -77,14 +77,37 @@ class LayerAsset(BaseModel):
     byteSize: int | None = None
     checksum: str | None = None
     storagePath: str | None = None
+    order: int | None = None
+    opacity: float | None = Field(default=None, ge=0, le=1)
+    blendMode: str | None = None
+    sourceFinalAssetId: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PlaybackManifestStep(BaseModel):
+    stepId: str
+    order: int
+    role: str
+    label: str
+    assetId: str | None = None
+    contentUrl: str | None = None
+    startMs: int = Field(ge=0)
+    durationMs: int = Field(gt=0)
+    opacityFrom: float = Field(default=0.0, ge=0, le=1)
+    opacityTo: float = Field(default=1.0, ge=0, le=1)
+    blendMode: str = "normal"
+    easing: str = "ease-out"
+    transition: str = "fade-in"
+    step: int | None = None
+    phase: str | None = None
+    assetRole: str | None = None
 
 
 class PlaybackManifest(BaseModel):
     manifestVersion: str
     canvasSize: dict[str, int]
     durationMs: int
-    steps: list[dict[str, Any]] = Field(default_factory=list)
+    steps: list[PlaybackManifestStep] = Field(default_factory=list)
     layerRefs: list[str] = Field(default_factory=list)
     finalCompositeAssetId: str | None = None
 

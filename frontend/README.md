@@ -5,7 +5,7 @@ VocaSketch 前端是一个 Vite + React 绘图工作台原型，用于演示语�
 当前版本保留原有 v1 工作台逻辑，并额外提供一条最小化的 v2 drawing job 体验面板：
 
 - v1：语音指令 + Canvas 演示工作台
-- v2：连接 `backend_py` 的 drawing job / SSE / preview / final asset content
+- v2：连接 `backend_py` 的 drawing job / SSE / preview / final asset content / layer playback
 
 当前仍不接入真实外部模型，不会发起真实模型网络请求。
 
@@ -54,6 +54,7 @@ npm run preview  # 预览构建结果
 - Canvas 二次元水彩头像绘制
 - 最小 v2 drawing job 面板
 - preview / final SVG asset 展示
+- 按 playback manifest 顺序播放 layer assets
 - 语义图层面板
 - 角色属性面板
 - 撤销、重做、暂停、继续、回放和导出入口
@@ -62,6 +63,5 @@ npm run preview  # 预览构建结果
 
 - ASR/TTS 服务接入
 - 后端 `/api/v1/commands/interpret` 指令解析
-- v2 layer playback UI
 - 工程保存和恢复
 - 真实操作历史回放

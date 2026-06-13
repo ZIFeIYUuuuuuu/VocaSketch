@@ -227,16 +227,30 @@ export interface LayerAsset {
   byteSize?: number | null;
   checksum?: string | null;
   storagePath?: string | null;
+  order?: number | null;
+  opacity?: number | null;
+  blendMode?: string | null;
+  sourceFinalAssetId?: string | null;
   metadata: Record<string, unknown>;
 }
 
 export interface PlaybackManifestStep {
-  step: number;
-  phase: string;
-  assetRole: string;
+  stepId: string;
+  order: number;
+  role: string;
+  label: string;
+  startMs: number;
   durationMs: number;
-  assetId?: string;
-  contentUrl?: string;
+  opacityFrom: number;
+  opacityTo: number;
+  blendMode: string;
+  easing: string;
+  transition: string;
+  assetId?: string | null;
+  contentUrl?: string | null;
+  step?: number | null;
+  phase?: string | null;
+  assetRole?: string | null;
 }
 
 export interface PlaybackManifest {
