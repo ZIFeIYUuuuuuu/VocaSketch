@@ -67,6 +67,10 @@ class AssetStore:
             byteSize=record.byteSize,
             checksum=record.checksum,
             storagePath=record.storagePath,
+            order=spec.order,
+            opacity=spec.opacity,
+            blendMode=spec.blend_mode,
+            sourceFinalAssetId=spec.source_final_asset_id,
             metadata=record.metadata,
         )
 
@@ -152,6 +156,12 @@ class AssetStore:
             return spec.file_extension.lstrip(".")
         if spec.mime_type == "image/svg+xml":
             return "svg"
+        if spec.mime_type == "image/png":
+            return "png"
+        if spec.mime_type == "image/jpeg":
+            return "jpg"
+        if spec.mime_type == "image/webp":
+            return "webp"
         if spec.mime_type == "application/json":
             return "json"
         if spec.mime_type.startswith("text/"):

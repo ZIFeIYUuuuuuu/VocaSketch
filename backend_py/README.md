@@ -10,10 +10,71 @@
 - LangGraph-backed / sequential-fallback mock drawing workflow
 - Provider registry / config / placeholder gateway 框架
 - 可选真实 LLM 文本节点边界
+- 可选真实 image provider 边界
 - File-backed asset content 层
 - `preview_ready` 断点确认
 - `confirm` / `cancel` / `retry` 基础控制
 - 为未来 LangGraph 编排预留清晰模块边界
+
+## Stage 10 Layer Decomposition / Playback
+
+- 默认 provider profile 仍是 `mock`
+- 默认运行路径仍不联网，layer decomposition / playback manifest 继续由本地 mock provider 完成
+- `openai` profile 现在支持更细的 mixed mode：
+  - `live text + mock image + mock layers`
+  - `live text + live image + mock layers`
+  - `live text + live image + live layers`
+- 只有在同时满足以下条件时，layer decomposition 才会启用真实 layer transport：
+  - `VOCASKETCH_PROVIDER_PROFILE=openai`
+  - `VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS=1`
+  - `VOCASKETCH_OPENAI_API_BASE_URL` 已配置
+  - `VOCASKETCH_OPENAI_API_KEY` 已配置
+  - `VOCASKETCH_OPENAI_RESPONSE_MODEL` 已配置
+  - `VOCASKETCH_OPENAI_LAYER_MODEL` 已配置
+- 如果只开启了 live text 或 live image，但没有 `layerModel`，系统会继续走 mock layer decomposition，保证前端 playback 体验闭环不断
+- 当前 layer transport 只建立了边界与 fake transport 测试，不作为默认路径启用
+- layer asset metadata 现在会稳定包含：
+  - `role`
+  - `order`
+  - `opacity`
+  - `blendMode`
+  - `sourceFinalAssetId`
+- playback manifest steps 现在面向前端播放语义稳定输出：
+  - `stepId`
+  - `order`
+  - `role`
+  - `label`
+  - `assetId`
+  - `contentUrl`
+  - `startMs`
+  - `durationMs`
+  - `opacityFrom`
+  - `opacityTo`
+  - `blendMode`
+  - `easing`
+  - `transition`
+- 当前前端 v2 panel 已能按 manifest 顺序播放 `sketch -> lineart -> flat_color -> shadow -> lighting -> details`
+- fake transport 测试不发真实网络请求
+
+## Stage 9 Image Provider 层
+
+- 默认 provider profile 仍是 `mock`
+- 默认运行路径仍不联网，preview / final 继续生成本地 SVG mock asset
+- `openai` profile 现在支持更细的 mixed mode：
+  - `live text + mock image`
+  - `live text + live image`
+- 只有在同时满足以下条件时，preview / final 才会启用真实 image transport：
+  - `VOCASKETCH_PROVIDER_PROFILE=openai`
+  - `VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS=1`
+  - `VOCASKETCH_OPENAI_API_BASE_URL` 已配置
+  - `VOCASKETCH_OPENAI_API_KEY` 已配置
+  - `VOCASKETCH_OPENAI_RESPONSE_MODEL` 已配置
+  - `VOCASKETCH_OPENAI_IMAGE_MODEL` 已配置
+- 如果只配置了 live text，但没有 `imageModel`，系统会继续走 `live text + mock image`，这样前端仍能拿到完整 preview/final 闭环
+- image transport 当前只建立了 OpenAI-compatible endpoint 边界与 fake transport 测试，不作为默认路径启用
+- live image asset 会以 `png` / `jpeg` / `webp` 等真实图片 bytes 落盘，并继续复用同一个 `contentUrl`
+- layer decomposition / playback 仍然是 mock，不是真实图层分解
+- fake transport 测试不发真实网络请求
 
 ## Stage 8 文本 LLM Provider 层
 
@@ -23,10 +84,10 @@
   - `parse_intent`
   - `build_visual_brief`
   - `build_image_prompt`
-- preview / final / layer / playback 仍走本地 mock SVG asset provider
+- preview / final 默认仍走本地 mock SVG asset provider；Stage 9 中可以在显式开启时切到 live image transport
 - 这意味着当前是可选的 mixed mode：
   - live text intelligence
-  - local mock image assets
+  - local mock image assets，或在显式开启后使用 live preview/final image
 - 测试使用 fake transport，不发真实网络请求
 
 ## Stage 6 资产内容层
@@ -35,6 +96,7 @@
 - 新增 `GET /api/v2/assets/{assetId}/content` 返回实际内容文件
 - preview / final / layer asset 现在会落本地内容文件，并提供稳定 `contentUrl`
 - 默认 mock provider 生成的是本地 SVG 占位图，`mimeType=image/svg+xml`
+- Stage 9 live image path 会把真实图片 bytes 落地为 `png` / `jpeg` / `webp` 文件，并复用相同的 metadata / content contract
 - playback manifest 也会落成本地 JSON 文件，便于调试和前端读取
 - 如果 metadata 存在但内容文件丢失，content endpoint 返回 `410 Gone`
 
@@ -50,7 +112,9 @@
   - 不会静默 fallback 成功
   - 缺少最低限度的非 secret 公共配置时，应用会在启动时 fail fast
   - 公共配置齐全但未显式开启 live 请求时，应用可启动，但 job 会在执行节点时明确返回 `ProviderError`
-  - 只有 `openai` profile 在显式 live 开关开启后，才会进入真实文本节点 + mock 资产 mixed mode
+  - 只有 `openai` profile 在显式 live 开关开启后，才会进入 mixed mode
+  - 未配置 `imageModel`：真实文本节点 + mock 资产
+  - 配置 `imageModel`：真实文本节点 + 真实 preview/final image + mock layers/playback
 - route 层和 workflow service 层都不感知具体 provider 类型，只依赖统一的 `ProviderGateway`
 
 ## Stage 4 编排层
@@ -103,8 +167,8 @@
 - 真实生图与分层 provider 接入
 
 当前 `assets` 会返回 metadata，并为 mock image asset 生成本地 SVG 文件内容。
-当前仍未接入真实生图模型、真实分层模型。
-当前已接入 LangGraph 编排边界、provider registry，以及一个可选的真实文本 LLM provider 边界；默认仍不接任何真实外部 provider。
+当前仍未接入真实分层模型。
+当前已接入 LangGraph 编排边界、provider registry、可选真实文本 LLM provider 边界，以及可选真实生图 provider 边界；默认仍不接任何真实外部 provider。
 
 ## 安装依赖
 
@@ -150,7 +214,7 @@ set VOCASKETCH_OPENAI_RESPONSE_MODEL=gpt-placeholder
 set VOCASKETCH_OPENAI_IMAGE_MODEL=image-placeholder
 ```
 
-如果你要显式测试 Stage 8 的 live text provider 边界，需要额外开启：
+如果你要显式测试 Stage 8/9 的 live provider 边界，需要额外开启：
 
 ```bash
 set VOCASKETCH_PROVIDER_PROFILE=openai
@@ -158,13 +222,20 @@ set VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS=1
 set VOCASKETCH_OPENAI_API_BASE_URL=https://api.openai.com/v1
 set VOCASKETCH_OPENAI_API_KEY=your-key
 set VOCASKETCH_OPENAI_RESPONSE_MODEL=gpt-structured-model
+set VOCASKETCH_OPENAI_IMAGE_MODEL=gpt-image-model
+```
+
+如果你要显式测试 Stage 10 的 live layer provider 边界，还需要补上：
+
+```bash
+set VOCASKETCH_OPENAI_LAYER_MODEL=gpt-layer-model
 ```
 
 注意：
 
 - 默认不要开启 live requests
 - README 示例不要把真实 key 写进仓库
-- 自动化测试仍使用 fake transport，不发网络请求
+- 自动化测试仍使用 fake text transport / fake image transport / fake layer transport，不发网络请求
 
 ## 启动
 
@@ -195,9 +266,11 @@ http://127.0.0.1:8000
 - `POST /retry` 当前会记录 `fromPhase` / `reason` 到事件 payload 里，便于审计
 - 但当前 mock retry 仍然会从 `queued` 全量重跑，不会从指定 phase 局部恢复
 - 当前 workflow 内部已按节点拆分
-- 当前即使使用 LangGraph-backed runner，preview / final / layers 仍然由本地 SVG mock asset 提供
+- 当前即使使用 LangGraph-backed runner，playback 仍由 workflow service 保持节点级状态推进
+- 当前 preview / final 默认仍由本地 SVG mock asset 提供；只有显式 live image 配置齐全时才会请求 image transport
+- 当前 layers 默认仍由本地 SVG mock provider 提供；只有显式 live layer 配置齐全时才会请求 layer transport
 - 当前默认 profile 仍不会发真实请求
-- 当前 `openai` profile 只有显式 live 开关开启时，才会让文本节点发起真实请求；自动化测试不会这样做
+- 当前 `openai` profile 只有显式 live 开关开启时，才会让文本节点与可选 image / layer 节点发起真实请求；自动化测试不会这样做
 - 不要把 API key 写入代码、日志、事件 payload、job metadata 或 README 示例
 
 ## 典型验证流程
@@ -230,13 +303,13 @@ curl -X POST http://127.0.0.1:8000/api/v2/drawing-jobs/<jobId>/confirm ^
 curl http://127.0.0.1:8000/api/v2/drawing-jobs/<jobId>
 ```
 
-5. 拉取 mock asset metadata
+5. 拉取 asset metadata
 
 ```bash
 curl http://127.0.0.1:8000/api/v2/assets/<assetId>
 ```
 
-6. 拉取 mock asset content
+6. 拉取 asset content
 
 ```bash
 curl http://127.0.0.1:8000/api/v2/assets/<assetId>/content

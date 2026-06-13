@@ -24,6 +24,12 @@ import { LayerPanel } from './components/LayerPanel';
 import { StatusIndicator } from './components/StatusIndicator';
 import { VoiceController } from './components/VoiceController';
 import { DemoScriptPanel } from './components/DemoScriptPanel';
+import {
+  computePlaybackElapsed,
+  pausePlaybackAt,
+  restartPlaybackAt,
+  resumePlaybackAt,
+} from './utils/playback.js';
 import { CharacterConfig, DrawStage, PaintLayer, SystemState, VoiceLog } from './types';
 import {
   buildAssetContentUrl,
@@ -54,6 +60,8 @@ import type {
   DrawingOperation,
   JobEvent,
   JobStatus,
+  LayerAsset,
+  PlaybackManifestStep,
   ProjectHistoryEntry
 } from './api/types';
 
@@ -133,6 +141,9 @@ export default function App() {
   const [isV2Confirming, setIsV2Confirming] = useState<boolean>(false);
   const [isV2Retrying, setIsV2Retrying] = useState<boolean>(false);
   const [isV2Cancelling, setIsV2Cancelling] = useState<boolean>(false);
+  const [isV2PlaybackRunning, setIsV2PlaybackRunning] = useState<boolean>(false);
+  const [v2PlaybackElapsedMs, setV2PlaybackElapsedMs] = useState<number>(0);
+  const [v2PlaybackSessionNonce, setV2PlaybackSessionNonce] = useState<number>(0);
 
   // State Machine control vectors
   const [drawProgress, setDrawProgress] = useState<number>(0);
@@ -177,6 +188,9 @@ export default function App() {
   const v2SubscriptionRef = useRef<{ close: () => void } | null>(null);
   const v2PollTimerRef = useRef<number | null>(null);
   const v2ActiveJobIdRef = useRef<string | null>(null);
+  const v2PlaybackRafRef = useRef<number | null>(null);
+  const v2PlaybackStartedAtRef = useRef<number | null>(null);
+  const v2PlaybackBaseElapsedRef = useRef<number>(0);
 
   // UI layout extra toggles
   const [isFullScreen, setIsFullScreen] = useState<boolean>(false);
@@ -208,9 +222,50 @@ export default function App() {
     v2SubscriptionRef.current = null;
   };
 
+  const stopV2PlaybackLoop = () => {
+    if (v2PlaybackRafRef.current !== null) {
+      window.cancelAnimationFrame(v2PlaybackRafRef.current);
+      v2PlaybackRafRef.current = null;
+    }
+  };
+
+  const pauseV2Playback = () => {
+    const snapshot = pausePlaybackAt(v2PlaybackElapsedMs);
+    stopV2PlaybackLoop();
+    v2PlaybackBaseElapsedRef.current = snapshot.baseElapsedMs;
+    v2PlaybackStartedAtRef.current = snapshot.startedAtMs;
+    setIsV2PlaybackRunning(false);
+  };
+
+  const resumeV2Playback = () => {
+    const snapshot = resumePlaybackAt(v2PlaybackElapsedMs, performance.now());
+    v2PlaybackBaseElapsedRef.current = snapshot.baseElapsedMs;
+    v2PlaybackStartedAtRef.current = snapshot.startedAtMs;
+    setIsV2PlaybackRunning(true);
+  };
+
+  const restartV2Playback = () => {
+    const snapshot = restartPlaybackAt(performance.now());
+    stopV2PlaybackLoop();
+    v2PlaybackBaseElapsedRef.current = snapshot.baseElapsedMs;
+    v2PlaybackStartedAtRef.current = snapshot.startedAtMs;
+    setV2PlaybackElapsedMs(0);
+    setIsV2PlaybackRunning(true);
+    setV2PlaybackSessionNonce((value) => value + 1);
+  };
+
+  const resetV2Playback = () => {
+    stopV2PlaybackLoop();
+    v2PlaybackStartedAtRef.current = null;
+    v2PlaybackBaseElapsedRef.current = 0;
+    setIsV2PlaybackRunning(false);
+    setV2PlaybackElapsedMs(0);
+  };
+
   const resetV2Tracking = () => {
     stopV2Subscription();
     stopV2Polling();
+    stopV2PlaybackLoop();
     v2ActiveJobIdRef.current = null;
   };
 
@@ -512,6 +567,7 @@ export default function App() {
     setV2EventLog([]);
     setV2FlowMessage('正在创建 drawing job...');
     resetV2Tracking();
+    resetV2Playback();
 
     try {
       const created = await createDrawingJob(prompt, {
@@ -574,6 +630,7 @@ export default function App() {
       setV2PlaybackManifestAsset(null);
       setV2LastEventType(null);
       setV2EventLog([]);
+      resetV2Playback();
       v2ActiveJobIdRef.current = retried.jobId;
       await refreshV2JobSnapshot(retried.jobId);
       trackV2Job(retried.jobId);
@@ -599,6 +656,7 @@ export default function App() {
       setV2FlowMessage('drawing job 已取消。');
       stopV2Polling();
       stopV2Subscription();
+      setIsV2PlaybackRunning(false);
     } catch (error) {
       console.error('Cancelling v2 drawing job failed.', error);
       setV2UiError(error instanceof Error ? error.message : '取消 v2 drawing job 失败。');
@@ -2151,11 +2209,108 @@ export default function App() {
     : v2Job?.finalAssetId
       ? buildAssetContentUrl(v2Job.finalAssetId)
       : null;
-  const v2LayerAssets = v2Job?.layerAssets ?? [];
+  const v2LayerAssets: LayerAsset[] = v2Job?.layerAssets ?? [];
+  const v2LayerAssetsById = new Map<string, LayerAsset>(v2LayerAssets.map((layer) => [layer.assetId, layer]));
+  const v2PlaybackSteps: PlaybackManifestStep[] = [...(v2Job?.playbackManifest?.steps ?? [])].sort(
+    (left, right) => left.order - right.order
+  );
+  const v2PlaybackDurationMs = v2Job?.playbackManifest?.durationMs ?? 0;
+  const v2PlaybackSignature = `${v2Job?.jobId ?? 'none'}:${v2Job?.playbackManifestAssetId ?? 'none'}`;
+  const v2PlaybackLayers = v2PlaybackSteps
+    .map((step) => {
+      const layer = step.assetId ? v2LayerAssetsById.get(step.assetId) : undefined;
+      if (!layer) {
+        return null;
+      }
+      return {
+        step,
+        layer,
+        src: buildAssetContentUrl({
+          assetId: layer.assetId,
+          contentUrl: layer.contentUrl,
+        }),
+      };
+    })
+    .filter((entry): entry is { step: PlaybackManifestStep; layer: LayerAsset; src: string } => entry !== null);
+  const v2HasPlayableManifest = v2PlaybackLayers.length > 0 && v2PlaybackDurationMs > 0;
+  let v2CurrentPlaybackStepIndex = -1;
+  for (let index = 0; index < v2PlaybackSteps.length; index += 1) {
+    const step = v2PlaybackSteps[index];
+    if (v2PlaybackElapsedMs >= step.startMs) {
+      v2CurrentPlaybackStepIndex = index;
+    } else {
+      break;
+    }
+  }
+  const v2CurrentPlaybackStep =
+    v2CurrentPlaybackStepIndex >= 0 ? v2PlaybackSteps[v2CurrentPlaybackStepIndex] : v2PlaybackSteps[0] ?? null;
   const canConfirmV2Job = v2Job?.status === 'preview_ready' && v2Job.requiresConfirmation;
   const canRetryV2Job = v2Job?.status === 'failed';
   const canCancelV2Job = !!v2Job && !isTerminalV2Status(v2Job.status);
-  const v2ManifestStepCount = v2Job?.playbackManifest?.steps.length ?? 0;
+  const v2ManifestStepCount = v2PlaybackSteps.length;
+
+  const getV2PlaybackOpacity = (startMs: number, durationMs: number, opacityFrom: number, opacityTo: number) => {
+    if (v2PlaybackElapsedMs <= startMs) {
+      return opacityFrom;
+    }
+    if (v2PlaybackElapsedMs >= startMs + durationMs) {
+      return opacityTo;
+    }
+
+    const progress = (v2PlaybackElapsedMs - startMs) / durationMs;
+    const easedProgress = 1 - Math.pow(1 - Math.min(Math.max(progress, 0), 1), 2);
+    return opacityFrom + (opacityTo - opacityFrom) * easedProgress;
+  };
+
+  useEffect(() => {
+    if (!v2HasPlayableManifest) {
+      resetV2Playback();
+      return;
+    }
+
+    stopV2PlaybackLoop();
+    v2PlaybackStartedAtRef.current = null;
+    v2PlaybackBaseElapsedRef.current = 0;
+    setV2PlaybackElapsedMs(0);
+    setIsV2PlaybackRunning(v2Job?.status === 'completed' || v2Job?.status === 'playback_ready');
+  }, [v2PlaybackSignature, v2HasPlayableManifest, v2Job?.status]);
+
+  useEffect(() => {
+    if (!isV2PlaybackRunning || !v2HasPlayableManifest) {
+      stopV2PlaybackLoop();
+      v2PlaybackStartedAtRef.current = null;
+      return;
+    }
+
+    if (v2PlaybackStartedAtRef.current === null) {
+      v2PlaybackStartedAtRef.current = performance.now();
+    }
+
+    const tick = (now: number) => {
+      const nextElapsed = computePlaybackElapsed(
+        v2PlaybackBaseElapsedRef.current,
+        v2PlaybackStartedAtRef.current,
+        now,
+        v2PlaybackDurationMs
+      );
+      setV2PlaybackElapsedMs(nextElapsed);
+
+      if (nextElapsed >= v2PlaybackDurationMs) {
+        v2PlaybackBaseElapsedRef.current = v2PlaybackDurationMs;
+        v2PlaybackStartedAtRef.current = null;
+        setIsV2PlaybackRunning(false);
+        stopV2PlaybackLoop();
+        return;
+      }
+
+      v2PlaybackRafRef.current = window.requestAnimationFrame(tick);
+    };
+
+    v2PlaybackRafRef.current = window.requestAnimationFrame(tick);
+    return () => {
+      stopV2PlaybackLoop();
+    };
+  }, [isV2PlaybackRunning, v2HasPlayableManifest, v2PlaybackDurationMs, v2PlaybackSessionNonce]);
 
   return (
     <div className={`min-h-screen ${isLightMode ? 'bg-[#f4f5f8] text-slate-800' : 'bg-[#09090c] text-slate-100'} flex flex-col font-sans transition-colors duration-300 selection:bg-cyan-550 selection:text-black`}>
@@ -2462,8 +2617,12 @@ export default function App() {
                 <p className="mt-1 text-[11px] leading-relaxed">{v2Job.error?.message ?? 'unknown error'}</p>
                 <button
                   onClick={() => void handleRetryV2DrawingJob()}
-                  disabled={isV2Retrying}
-                  className="mt-3 px-3 py-2 rounded-lg text-xs font-semibold bg-rose-500 text-white hover:bg-rose-400 transition-colors"
+                  disabled={!canRetryV2Job || isV2Retrying}
+                  className={`mt-3 px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                    !canRetryV2Job || isV2Retrying
+                      ? 'opacity-50 cursor-not-allowed bg-rose-300 text-white'
+                      : 'bg-rose-500 text-white hover:bg-rose-400'
+                  }`}
                 >
                   {isV2Retrying ? '重试中...' : '重试任务'}
                 </button>
@@ -2484,6 +2643,115 @@ export default function App() {
                     layers {v2LayerAssets.length} · steps {v2ManifestStepCount}
                   </span>
                 </div>
+                {v2HasPlayableManifest && (
+                  <div className={`rounded-xl border p-3 ${isLightMode ? 'bg-slate-50 border-slate-200' : 'bg-[#0c0d12] border-[#23232d]'}`}>
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className={`text-xs font-semibold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>Layer Playback Preview</p>
+                        <p className={`mt-1 text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                          step {Math.max(v2CurrentPlaybackStepIndex + 1, 1)} / {v2ManifestStepCount}
+                          {v2CurrentPlaybackStep ? ` · ${v2CurrentPlaybackStep.label}` : ''}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => {
+                            if (isV2PlaybackRunning) {
+                              pauseV2Playback();
+                              return;
+                            }
+                            resumeV2Playback();
+                          }}
+                          className={`px-3 py-2 rounded-lg text-xs font-semibold border transition-colors ${
+                            isLightMode
+                              ? 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                              : 'bg-[#14141c] border-[#2b2b38] text-slate-200 hover:bg-[#1b1b25]'
+                          }`}
+                        >
+                          {isV2PlaybackRunning ? '暂停' : '播放'}
+                        </button>
+                        <button
+                          onClick={restartV2Playback}
+                          className={`px-3 py-2 rounded-lg text-xs font-semibold border transition-colors ${
+                            isLightMode
+                              ? 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                              : 'bg-[#14141c] border-[#2b2b38] text-slate-200 hover:bg-[#1b1b25]'
+                          }`}
+                        >
+                          重播
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className={`mt-3 relative aspect-square w-full overflow-hidden rounded-xl border ${isLightMode ? 'bg-white border-slate-200' : 'bg-[#090a10] border-[#1f2230]'}`}>
+                      {v2FinalSrc && (
+                        <img
+                          src={v2FinalSrc}
+                          alt="V2 final composite background"
+                          className="absolute inset-0 h-full w-full object-cover"
+                          style={{ opacity: 0.08 }}
+                        />
+                      )}
+                      {v2PlaybackLayers.map(({ step, layer, src }) => (
+                        <img
+                          key={layer.assetId}
+                          src={src}
+                          alt={layer.label}
+                          className="absolute inset-0 h-full w-full object-cover transition-opacity duration-300"
+                          style={{
+                            opacity: getV2PlaybackOpacity(
+                              step.startMs,
+                              step.durationMs,
+                              step.opacityFrom,
+                              step.opacityTo
+                            ),
+                            mixBlendMode: step.blendMode as React.CSSProperties['mixBlendMode'],
+                          }}
+                        />
+                      ))}
+                    </div>
+
+                    <div className="mt-3 flex flex-col gap-2">
+                      <div className={`h-2 rounded-full overflow-hidden ${isLightMode ? 'bg-slate-200' : 'bg-[#1c1e28]'}`}>
+                        <div
+                          className="h-full bg-gradient-to-r from-cyan-400 via-sky-400 to-indigo-500 transition-all duration-150"
+                          style={{
+                            width: `${v2PlaybackDurationMs > 0 ? Math.min((v2PlaybackElapsedMs / v2PlaybackDurationMs) * 100, 100) : 0}%`
+                          }}
+                        />
+                      </div>
+                      <div className={`flex items-center justify-between text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                        <span>{Math.round(v2PlaybackElapsedMs)} ms</span>
+                        <span>{v2PlaybackDurationMs} ms</span>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      {v2PlaybackSteps.map((step, index) => (
+                        <div
+                          key={step.stepId}
+                          className={`rounded-lg border px-2.5 py-2 ${index === v2CurrentPlaybackStepIndex
+                            ? isLightMode
+                              ? 'bg-cyan-50 border-cyan-200'
+                              : 'bg-cyan-950/20 border-cyan-500/40'
+                            : isLightMode
+                              ? 'bg-white border-slate-200'
+                              : 'bg-[#10121a] border-[#23232d]'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <p className={`text-[11px] font-semibold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>{step.label}</p>
+                            <span className={`text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>#{step.order}</span>
+                          </div>
+                          <p className={`mt-1 text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                            {step.role} · {step.durationMs} ms · {step.blendMode}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 gap-2">
                   {v2LayerAssets.map((layer) => (
                     <div
@@ -2493,7 +2761,11 @@ export default function App() {
                       <div className="flex items-center justify-between gap-3">
                         <div>
                           <p className={`text-xs font-semibold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>{layer.label}</p>
-                          <p className={`text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>{layer.role}</p>
+                          <p className={`text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                            {layer.role}
+                            {layer.order ? ` · order ${layer.order}` : ''}
+                            {layer.blendMode ? ` · ${layer.blendMode}` : ''}
+                          </p>
                         </div>
                         {layer.contentUrl && (
                           <a
@@ -2511,7 +2783,7 @@ export default function App() {
                 </div>
                 {v2PlaybackManifestAsset && (
                   <div className={`rounded-lg border p-3 text-[11px] ${isLightMode ? 'bg-slate-50 border-slate-200 text-slate-600' : 'bg-[#0c0d12] border-[#23232d] text-slate-300'}`}>
-                    Playback manifest 已就绪，共 {v2ManifestStepCount} 步。
+                    Playback manifest 已就绪，共 {v2ManifestStepCount} 步，前端会按 step 的时间轴和 blendMode 播放分层过程。
                   </div>
                 )}
               </div>
