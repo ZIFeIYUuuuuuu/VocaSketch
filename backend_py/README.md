@@ -1,38 +1,5 @@
 # VocaSketch Python v2 Backend
 
-## Stage 15 Cancel / Retry / Timeout Consistency
-
-- Active jobs can be cancelled; cancelled jobs are terminal and should not later advance to preview, final, layers, playback, or completed.
-- Cancelling terminal jobs returns the v2 error envelope with `WORKFLOW_STATE_CONFLICT` and does not append new status events.
-- Retrying is only allowed for failed jobs. A retry creates a new job with `retryOfJobId`, starts a fresh event sequence at `seq=1`, and does not copy the previous job error into the new public snapshot.
-- Provider timeout, schema, and generic provider failures converge through stable codes: `PROVIDER_TIMEOUT`, `PROVIDER_SCHEMA_ERROR`, and `PROVIDER_ERROR`.
-- Failed snapshots, failed status events, and `job.failed` events preserve safe diagnostics while redacting secrets.
-- The default provider profile remains `mock`; the default runtime path stays offline and does not make real external model requests.
-
-## Stage 14 Error Contract / State Invariants
-
-- v2 HTTP errors use a stable envelope:
-  - `error.code`
-  - `error.message`
-  - `error.retryable`
-  - `error.details`
-- Drawing job, asset, runtime, and event-continuation errors are secret-safe and avoid stack traces, API keys, raw provider envelopes, and full local paths.
-- Job status events use strictly increasing `seq` values.
-- Job progress is expected to stay within `0..100` and not move backward across status-change events.
-- Terminal jobs (`completed`, `failed`, `cancelled`) keep `completedAt`; non-terminal jobs should not set it.
-- Snapshot status and latest status-change event are expected to converge to the same terminal state.
-- The default provider profile remains `mock`; the default runtime path stays offline and does not make real external model requests.
-
-## Stage 13 Session Resume / Event Continuation
-
-- `GET /api/v2/drawing-jobs/{jobId}/events` now supports event continuation.
-- Query params:
-  - `afterSeq`: replay only events with `seq > afterSeq`, then continue live SSE.
-  - `sinceSeq`: alias for the same behavior.
-- Invalid continuation values return `400`; missing jobs still return `404`.
-- This is still file-backed SSE history plus in-memory live fanout, not a durable message queue.
-- The default provider profile remains `mock`; the default runtime path stays offline and does not make real external model requests.
-
 ## Stage 12 Recent Jobs / Runtime Visibility
 
 - `GET /api/v2/drawing-jobs` returns a lightweight recent-job list for the v2 panel.

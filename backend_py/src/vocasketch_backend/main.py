@@ -4,13 +4,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi import HTTPException
-from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
 from .assets.asset_store import AssetStore
 from .config import get_config
-from .errors import v2_http_exception_handler, v2_validation_exception_handler
 from .event_bus import JobEventBus
 from .job_store import JobStore
 from .providers.config import get_provider_config
@@ -82,8 +79,6 @@ def create_app() -> FastAPI:
     app.include_router(drawing_jobs_router)
     app.include_router(assets_router)
     app.include_router(runtime_router)
-    app.add_exception_handler(HTTPException, v2_http_exception_handler)
-    app.add_exception_handler(RequestValidationError, v2_validation_exception_handler)
     return app
 
 
