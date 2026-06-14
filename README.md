@@ -19,9 +19,9 @@ VocaSketch 是一款面向比赛 demo 的 AI 语音绘图工作台。用户通�
 
 ## 产品定位
 
-VocaSketch 不是一键 AI 生图工具，而是一个语音驱动的数位绘画工作台。
+VocaSketch 不是单纯的一键 AI 生图工具，而是一个语音驱动的数位绘画工作台。
 
-系统计划将用户语音转换为结构化绘图操作，再在画布中执行草图、线稿、铺色、水彩、细节等阶段。最终作品以图层、对象、操作历史和回放记录的形式保存，方便评委验证绘图过程。
+当前主线是 Python v2 drawing job：用户通过语音或文本描述画面，系统在用户确认后启动绘图任务。后端可以在显式 live 配置下调用真实文本/生图/线稿模型，也可以默认走本地 mock/offline 路径。最终彩色图会被转成干净线稿和可播放的 stroke manifest，前端主视角用 Canvas 展示从草图、线稿、平涂、阴影、光照到完成图的绘画过程，而不是只展示一张结果图。
 
 ## MVP 范围
 
@@ -81,7 +81,9 @@ MVP 聚焦一个可控主题：
 
 ## 当前实现状态
 
-当前仓库已经切换为 Python-first v2 后端。前端可以本地启动，用于演示语音入口、Python drawing job、绘画过程播放、图层面板和本地 Canvas 辅助视图。后端提供 v2 drawing jobs、资产内容、runtime readiness、recent jobs、SSE 事件流和可选真实 provider 边界。
+当前仓库已经切换为 Python-first v2 后端。前端可以本地启动，用于演示语音入口、用户确认、Python drawing job、绘画过程播放、最近任务、运行时状态摘要、图层面板和本地 Canvas 辅助视图。后端提供 v2 drawing jobs、资产内容、runtime readiness、recent jobs、SSE 事件流、统一错误 envelope、取消/重试语义和可选真实 provider 边界。
+
+默认 profile 仍是 mock/offline，不会默认发起真实外部模型请求。真实 provider 只有在显式配置 live 环境变量、API key、base URL 和模型名称后才会启用。
 
 已包含：
 
@@ -98,14 +100,91 @@ MVP 聚焦一个可控主题：
 - 前端 Vite + React 工作台原型
 - Python FastAPI v2 后端
 - Drawing Job / SSE / 本地资产文件层
-- 可选真实文本与生图 provider 边界
-- 绘画过程播放 manifest 与派生帧
+- 可选真实文本、生图与模型线稿 provider 边界
+- recent jobs、runtime readiness、刷新恢复与断线续跟踪
+- 统一 API 错误 envelope、失败事件脱敏、取消/重试/超时一致性
+- 绘画过程播放 manifest、线稿向量化和 Canvas 逐笔回放
 - 仓库协作与 Git 操作规则
 
 暂未包含：
 
 - 生产级账号体系
 - 真实图层分解 provider 的生产接入
+
+## 当前主流程
+
+```mermaid
+flowchart TD
+  A["用户语音或文本输入"] --> B["前端收集原始描述"]
+  B --> C["5 秒静音收口"]
+  C --> D["展示原始输入并等待用户确认"]
+  D -->|确认开始绘制| E["POST /api/v2/drawing-jobs"]
+  E --> F["Python v2 后端创建 Drawing Job"]
+  F --> G["文本节点: 解析意图 / 视觉 brief / 生图 prompt"]
+  G --> H["生图节点: preview 作为内部产物"]
+  H --> I["自动推进 final image"]
+  I --> J["模型或本地流程生成干净 lineart"]
+  J --> K["向量化与 stroke 排序"]
+  K --> L["生成 playback manifest"]
+  L --> M["前端 Canvas 主视角播放绘画过程"]
+  M --> N["完成图 / 最近任务 / 可重播"]
+```
+
+## 绘画过程链路
+
+```mermaid
+flowchart LR
+  A["最终彩色图"] --> B["生成或提取干净线稿图"]
+  B --> C["线稿图向量化"]
+  C --> D["stroke 排序与节奏分配"]
+  D --> E["10% 草图"]
+  E --> F["25% 线稿: 从 0 逐笔绘制"]
+  F --> G["45% 平涂: 软笔刷区域扩散"]
+  G --> H["65% 阴影: Multiply 暗部叠加"]
+  H --> I["85% 光照: 高光与亮部叠加"]
+  I --> J["100% 完成: 收束到最终图"]
+```
+
+## 运行时架构
+
+```mermaid
+flowchart TB
+  subgraph Frontend["frontend / React"]
+    F1["语音确认与文本输入"]
+    F2["v2 Drawing Job 面板"]
+    F3["Canvas 绘画过程播放器"]
+    F4["Recent Jobs / Runtime Readiness"]
+  end
+
+  subgraph Backend["backend / FastAPI Python v2"]
+    B1["Drawing Job Routes"]
+    B2["Workflow / LangGraph 或 sequential runner"]
+    B3["Provider Gateway"]
+    B4["Asset Store / Job Store"]
+    B5["SSE Events"]
+  end
+
+  subgraph Providers["可选 provider"]
+    P1["mock/offline 默认"]
+    P2["live text provider"]
+    P3["live image provider"]
+    P4["model lineart provider"]
+  end
+
+  F1 --> F2
+  F2 --> B1
+  B1 --> B2
+  B2 --> B3
+  B3 --> P1
+  B3 --> P2
+  B3 --> P3
+  B3 --> P4
+  B2 --> B4
+  B2 --> B5
+  B4 --> F3
+  B5 --> F2
+  B1 --> F4
+```
 
 ## 启动说明
 
@@ -127,7 +206,7 @@ Python v2 后端当前可以本地启动：
 
 ```bash
 cd backend
-python -m uvicorn vocasketch_backend.main:app --app-dir src --host 127.0.0.1 --port 8000
+python -m uvicorn vocasketch_backend.main:create_app --factory --app-dir src --host 127.0.0.1 --port 8000
 ```
 
 默认开发地址：
