@@ -1,50 +1,5 @@
 ﻿# VocaSketch Frontend
 
-## v2 Process Playback
-
-- 如果后端 `playbackManifest.process.version=process-v1`，v2 面板优先使用 canvas 动作播放器，而不是只叠加静态 layer image。
-- 当前动作播放器会按时间轴展示草图、线稿、平涂扩散、阴影 `Layer: Multiply`、光照 `Layer: Add / Glow` 和最终成稿揭示；默认不再追加点睛高光。
-- 旧 job 或旧 manifest 没有 `process` 时，仍 fallback 到原来的 layer/frame playback。
-- 播放器只读取后端 final asset 的 `contentUrl` 和 manifest 动作数据；默认 mock/offline 路径不会触发真实外部模型请求。
-
-## Stage 15 v2 Operation Guards
-
-- The v2 panel guards create, cancel, and retry with a shared in-flight state so repeated clicks do not send overlapping workflow requests.
-- The current v2 user path does not show a preview or ask for preview confirmation; preview is an internal backend artifact and the user waits for drawing-process frames.
-- Failed jobs only enable retry when the backend snapshot marks `error.retryable=true`.
-- Cancelled and completed jobs are shown as terminal history views; cancelled jobs no longer imply generation is still running.
-- Retry success switches the panel to the new job and keeps the source job visible through `retryOfJobId`.
-- The default v2 backend profile remains `mock`; the default frontend path does not trigger real external model requests.
-
-## Stage 14 v2 Error Diagnostics
-
-- The frontend v2 API client recognizes the backend error envelope:
-  - `error.code`
-  - `error.message`
-  - `error.retryable`
-  - `error.details`
-- The v2 panel shows a readable error message plus compact diagnostics such as HTTP status, error code, and retryable flag.
-- Failed drawing jobs still use the job snapshot `error` object for retry gating.
-- Readiness, recent jobs, restore, create, confirm, cancel, and retry errors stay local to the v2 panel and do not break the local canvas workspace.
-- The default v2 backend profile remains `mock`; the default frontend path does not trigger real external model requests.
-
-## Stage 13 v2 Session Restore
-
-- The v2 panel stores the currently viewed drawing job id in browser storage.
-- On page refresh or reopen, the panel restores that job snapshot, reloads final/manifest metadata, and resumes tracking if the job is still active.
-- Completed, failed, or cancelled jobs restore as static history views.
-- The SSE client can reconnect with `afterSeq` so the backend only replays events after the last seen sequence.
-- If the saved job is missing or invalid, the panel clears the saved state and keeps the rest of the app usable.
-- The default v2 backend profile remains `mock`; the default frontend path does not trigger real external model requests.
-
-## Stage 12 v2 Panel Continuity
-
-- The v2 drawing panel can now load recent jobs from `GET /api/v2/drawing-jobs`.
-- Recent jobs show status, prompt summary, asset readiness, retry source, and last update time.
-- Clicking a recent job reopens its snapshot; active non-terminal jobs can keep using SSE/polling, while terminal jobs are shown as static history.
-- The panel also reads `GET /api/v2/runtime/readiness` and displays provider profile, runner mode, network mode, and text/internal-composition/final/layer modes.
-- The default v2 backend profile remains `mock`; the default frontend path does not trigger real external model requests.
-
 VocaSketch 前端是一个 Vite + React 绘图工作台，用于演示语音描述、Python v2 drawing job、绘画过程播放、图层面板和本地画布辅助视图。
 
 当前版本的正常后端流程已经全面转向 `backend`：
@@ -53,6 +8,32 @@ VocaSketch 前端是一个 Vite + React 绘图工作台，用于演示语音描�
 - 本地 Canvas：只保留为前端辅助展示，不再依赖旧 Node/V1 后端
 
 默认配置仍不接入真实外部模型，不会发起真实模型网络请求；只有显式 live 环境变量启用后才会走真实 provider。
+
+## 核心前端能力
+
+- 浏览器 Web Speech 语音输入
+- 5 秒静音后进入确认态
+- 用户确认后创建 Python v2 drawing job
+- recent jobs 历史查看与恢复
+- runtime readiness 摘要展示
+- final 图、图层和绘画过程播放
+- failed / cancelled / retry 状态提示
+
+## v2 绘画过程播放
+
+- 如果后端提供 `playbackManifest.process`，v2 面板优先使用 canvas 动作播放器，而不是只叠加静态 layer image。
+- 当前动作播放器会按时间轴展示草图、线稿、平涂扩散、阴影 `Layer: Multiply`、光照 `Layer: Add / Glow` 和最终成稿揭示。
+- 旧 job 或旧 manifest 没有 `process` 时，仍 fallback 到原来的 layer/frame playback。
+- 播放器只读取后端 final asset 的 `contentUrl` 和 manifest 动作数据；默认 mock/offline 路径不会触发真实外部模型请求。
+
+## v2 状态与恢复体验
+
+- 当前 v2 路径不会展示 preview 确认；preview 只是后端内部产物，用户直接等待绘画过程帧。
+- create、cancel、retry 都有 in-flight guard，避免重复点击造成重复请求。
+- failed job 只有在 `error.retryable=true` 时才会启用重试。
+- 页面刷新后会恢复最近查看的 drawing job；如果任务还没结束，会继续 SSE 或 polling 跟踪。
+- recent jobs 可以重新打开历史任务；terminal job 以静态历史态展示。
+- readiness、recent jobs、restore、create、cancel、retry 的错误都局部展示，不会拖垮整个页面。
 
 ## v2 默认用户流程
 

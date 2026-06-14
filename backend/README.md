@@ -2,40 +2,21 @@
 
 ## Process Playback Manifest
 
-- `build_playback_manifest_node` 会在保存 manifest 前补充当前 `process-v15` 动作时间轴。
-- 默认产品路径会生成一个后端渲染的 `process_video` MP4 asset；前端优先播放 `process.source.processVideoContentUrl`，没有视频时才回退到 canvas 动作渲染。
+- `build_playback_manifest_node` 会在保存 manifest 前补充当前 `process` 动作时间轴。
+- 默认产品路径会生成后端可消费的过程资产；前端优先播放 `process.source.processVideoContentUrl`，没有视频时才回退到 canvas 动作渲染。
 - `process` 不把大块 mask/envelope 写进 JSON；它只描述可诊断、可回退的轻量动作：
   - `stroke`: 草图/线稿笔迹生长
   - `fillRegion`: 平涂区域中心扩散
   - `maskReveal`: 阴影/光照蒙版式显现
   - `layerBadge`: `Layer: Multiply` / `Layer: Add / Glow`
   - `finalReveal`: 最终成稿揭示
-- 如果启用模型线稿，流程会变成：final 彩色图 -> Gemini clean lineart -> lineart 向量化 / stroke 排序 -> 后端 MP4 过程视频 -> 前端播放。
-- 未启用模型线稿时，后端会继续从 final/preview 图本地提取线稿并生成过程视频。
 - 默认 provider profile 仍是 `mock`；process playback 生成不联网，也不调用真实外部模型。
 
-## 可选 Gemini Clean Lineart
+## 过程生成口径
 
-模型线稿用于让绘画过程更接近“先画完整线稿，再上色”的效果。默认关闭，不会联网。
-
-启用条件：
-
-```powershell
-set VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS=1
-set VOCASKETCH_ENABLE_MODEL_LINEART=1
-set VOCASKETCH_LINEART_PROVIDER=gemini
-set VOCASKETCH_LINEART_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta
-set VOCASKETCH_LINEART_API_KEY=<your-gemini-api-key>
-set VOCASKETCH_LINEART_MODEL=<gemini-image-model>
-set VOCASKETCH_RENDER_PROCESS_VIDEO=1
-```
-
-安全边界：
-
-- API key 不会写入 runtime info、job metadata、events 或 asset metadata。
-- 模型线稿输出会保存为 `lineart` layer asset，metadata mode 为 `model-clean-lineart`。
-- `playbackManifest.process.source.lineartAssetId` / `lineartContentUrl` 会指向这张干净线稿图。
-- 如果模型线稿未配置，默认回到离线本地提取路径。
+- 默认流程不依赖真实外部模型，走本地派生过程。
+- 若后续启用真实 provider，仍需保证 API key 不进入 runtime info、job metadata、events 或 asset metadata。
+- `playbackManifest.process` 的目标是为前端提供稳定的绘画过程语义，而不是暴露底层实现细节。
 
 ## v2 默认主流程
 

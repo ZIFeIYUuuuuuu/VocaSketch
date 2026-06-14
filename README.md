@@ -2,7 +2,7 @@
 
 中文 | [English](README.en.md)
 
-VocaSketch 是一款面向七牛云 XEngineer 题目二的 AI 语音绘图工作台。用户主要通过中文语音描述创作意图，系统在执行前先复述确认，再把自然语言拆解为可执行绘图操作，最终生成一个可分层、可编辑、可回放的二次元水彩头像绘图工程，而不是只返回一张端到端生成图片。
+VocaSketch 是一款面向七牛云 XEngineer 题目二的 AI 语音绘图工作台。用户主要通过中文语音描述创作意图，系统在执行前先复述确认，再把自然语言拆解为可执行绘图操作，最终生成一个可分层、可回放、可解释的二次元水彩头像绘图工程，而不是只返回一张端到端生成图片。
 
 ## 参赛信息
 
@@ -10,6 +10,17 @@ VocaSketch 是一款面向七牛云 XEngineer 题目二的 AI 语音绘图工作
 - 赛题：题目二，AI 语音绘图工具
 - 参赛形式：个人参赛
 - 仓库地址：[ZIFeIYUuuuuuu/VocaSketch](https://github.com/ZIFeIYUuuuuuu/VocaSketch)
+- Demo 视频：[七牛云×XEngineer暑期实训营-2026-批次4-赛题2](https://www.bilibili.com/video/BV13LJP67EJ3/?share_source=copy_web&vd_source=105a7431714c59e38e2598fd37497aa9)
+
+## 评审入口
+
+- 一句话概览：语音驱动的 AI 绘图工作台
+- 仓库地址：[ZIFeIYUuuuuuu/VocaSketch](https://github.com/ZIFeIYUuuuuuu/VocaSketch)
+- Demo 视频：[七牛云×XEngineer暑期实训营-2026-批次4-赛题2](https://www.bilibili.com/video/BV13LJP67EJ3/?share_source=copy_web&vd_source=105a7431714c59e38e2598fd37497aa9)
+- 快速启动：见下方“本地启动方式”
+- 架构说明：[docs/architecture.md](docs/architecture.md)
+- 项目结构：[docs/project-structure.md](docs/project-structure.md)
+- 开发与启动：[docs/startup.md](docs/startup.md)
 
 ## 项目简介
 
@@ -22,6 +33,14 @@ VocaSketch 的产品定位不是“一键 AI 生图”，而是“语音驱动�
 - 用户确认后启动绘制
 - 后端生成结构化绘图任务与过程资产
 - 前端以图层、过程播放和完成图的形式展示结果
+
+## 设计思考
+
+我一开始其实想做的是很直观的前端 Canvas 绘制：用线条、笔刷和动画去模拟“正在画画”的感觉。但真正做下来后发现，仅靠自然语言驱动前端去拼动画，最终效果往往不够稳定，也很难让用户相信这不是一张普通的 AI 生图。
+
+所以我把思路往前推进了一步：既然已经要用大模型，就不能只把它当成“出图器”，而要让它先理解用户意图，再把结果拆成更接近人类数位板绘画的阶段。于是整个流程改成了先打草稿，再出线稿，再平涂，随后补阴影、光照和最后微调，让用户看到的是一条完整的绘画过程，而不是一张突然生成的成品图。
+
+这也是 VocaSketch 和传统“一键生图”最大的不同。
 
 ## 核心亮点
 
@@ -74,7 +93,7 @@ VocaSketch 的产品定位不是“一键 AI 生图”，而是“语音驱动�
 
 ## Demo 视频
 
-- Demo 视频链接：待补充（录制完成后替换为 Bilibili 或网盘可访问链接）
+- Demo 视频链接：[七牛云×XEngineer暑期实训营-2026-批次4-赛题2](https://www.bilibili.com/video/BV13LJP67EJ3/?share_source=copy_web&vd_source=105a7431714c59e38e2598fd37497aa9)
 - 建议视频内容：
   - 1. 一句话创建角色
   - 2. 系统复述并等待确认
@@ -94,6 +113,62 @@ flowchart TD
   F --> G["生成线稿与过程播放 manifest"]
   G --> H["前端 Canvas 逐步播放绘画过程"]
   H --> I["展示完成图 / 图层 / 最近任务"]
+```
+
+## 绘画过程链路
+
+```mermaid
+flowchart LR
+  A["最终彩色图"] --> B["生成或提取干净线稿图"]
+  B --> C["线稿图向量化"]
+  C --> D["stroke 排序与节奏分配"]
+  D --> E["10% 草图"]
+  E --> F["25% 线稿: 从 0 逐笔绘制"]
+  F --> G["45% 平涂: 软笔刷区域扩散"]
+  G --> H["65% 阴影: Multiply 暗部叠加"]
+  H --> I["85% 光照: 高光与亮部叠加"]
+  I --> J["100% 完成: 收束到最终图"]
+```
+
+## 前后端运行时架构
+
+```mermaid
+flowchart TB
+  subgraph Frontend["frontend / React"]
+    F1["语音确认与文本输入"]
+    F2["v2 Drawing Job 面板"]
+    F3["Canvas 绘画过程播放器"]
+    F4["Recent Jobs / Runtime Readiness"]
+  end
+
+  subgraph Backend["backend / FastAPI Python v2"]
+    B1["Drawing Job Routes"]
+    B2["Workflow / LangGraph 或 sequential runner"]
+    B3["Provider Gateway"]
+    B4["Asset Store / Job Store"]
+    B5["SSE Events"]
+  end
+
+  subgraph Providers["可选 provider"]
+    P1["mock/offline 默认"]
+    P2["live text provider"]
+    P3["live image provider"]
+    P4["model lineart provider"]
+  end
+
+  F1 --> F2
+  F2 --> B1
+  B1 --> B2
+  B2 --> B3
+  B3 --> P1
+  B3 --> P2
+  B3 --> P3
+  B3 --> P4
+  B2 --> B4
+  B2 --> B5
+  B4 --> F3
+  B5 --> F2
+  B1 --> F4
 ```
 
 ## 技术栈

@@ -2,7 +2,7 @@
 
 ## Overview
 
-VocaSketch uses a voice-to-operations architecture.
+VocaSketch 使用的是一条“语音输入 -> 任务编排 -> 绘画过程展示”的架构链路，核心目标不是只生成成图，而是让结果具备过程感和可解释性。
 
 ```text
 User speech
@@ -38,33 +38,34 @@ User speech
 
 The current backend is `backend`, a FastAPI v2 service with file-backed jobs, events, assets, provider gateways, and deterministic process playback. The old Node/V1 backend has been removed from the normal runtime path.
 
-## Parser Adapter
+## Intent / Prompt Layer
 
-The parser adapter converts natural-language instructions into a stable internal DSL.
-
-The adapter should support provider replacement:
+后端会把用户的原始输入转成稳定的中间表示，再进入后续绘图链路。这一层需要支持 provider 替换：
 
 - OpenAI-compatible endpoint for MVP
 - DashScope or another official provider later
-- local command parser for high-frequency control commands
+- local fallback parser for controlled demo mode
 
-The current implementation uses the local command parser first so that frontend/backend integration can be tested without external provider keys.
+当前主线默认仍支持离线/受控演示模式，因此不会要求默认联网，也不会要求前端暴露 API key。
 
 The historical `/api/v1` HTTP API contract is archived in [archive/api-v1-contract.md](archive/api-v1-contract.md). New work should target `backend` `/api/v2`.
 
-## Drawing Engine
+## Drawing Process Strategy
 
-The drawing engine should operate on structured commands instead of free text.
+本项目的关键设计不是“自然语言直接驱动画笔动画”，而是：
 
-Planned operation categories:
+- 先让后端理解用户意图
+- 再生成 final 图或受控中间结果
+- 最后把结果拆回更接近人类数位板流程的阶段
 
-- style operations
-- character attribute operations
-- pose operations
-- layer operations
-- object modification operations
-- control operations
-- replay/export operations
+当前绘画过程重点围绕以下阶段组织：
+
+- 草图
+- 线稿
+- 平涂
+- 阴影
+- 光照
+- 完成图收束
 
 ## Persistence
 
@@ -77,10 +78,10 @@ The backend should save:
 - object data
 - operation history
 - user transcription
-- parser result
+- intent / prompt result
 - confirmation records
 
-For the local competition demo, anonymous sessions and local JSON files under `APP_STORAGE_DIR` are enough. Login and database setup are out of MVP scope.
+For the local competition demo, anonymous sessions and local JSON files under `VOCASKETCH_BACKEND_DATA_DIR` are enough. Login and database setup are out of MVP scope.
 
 ## Risk Controls
 
