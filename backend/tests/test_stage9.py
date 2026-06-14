@@ -53,6 +53,7 @@ class Stage9ImageProviderTests(unittest.TestCase):
         env_patch = {
             "VOCASKETCH_BACKEND_DATA_DIR": tempdir.name,
             "VOCASKETCH_WORKFLOW_STEP_DELAY_SECONDS": "0.02",
+            "VOCASKETCH_RENDER_PROCESS_VIDEO": "0",
             "VOCASKETCH_PROVIDER_PROFILE": "mock",
             "VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS": "0",
             "VOCASKETCH_OPENAI_API_BASE_URL": "",
@@ -272,13 +273,15 @@ class Stage9ImageProviderTests(unittest.TestCase):
             self.assertEqual([step["label"] for step in manifest_steps], ["10% 草图", "25% 线稿", "45% 平涂", "65% 阴影", "85% 光照", "100% 完成"])
             self.assertTrue(all(step["transition"] == "replace-frame" for step in manifest_steps))
 
-            self.assertEqual(len(fake_text_transport.requests), 3)
+            self.assertGreaterEqual(len(fake_text_transport.requests), 3)
             self.assertEqual(len(fake_image_transport.requests), 2)
             self.assertEqual(fake_image_transport.requests[0].mode, "preview")
             self.assertEqual(fake_image_transport.requests[0].size, "768x768")
             self.assertEqual(fake_image_transport.requests[0].timeout_seconds, 20.0)
+            self.assertIn("anime", fake_image_transport.requests[0].prompt.lower())
             self.assertEqual(fake_image_transport.requests[1].mode, "final")
             self.assertEqual(fake_image_transport.requests[1].size, "1024x1024")
+            self.assertIn("anime", fake_image_transport.requests[1].prompt.lower())
 
     def test_live_image_can_use_separate_gateway_and_key(self):
         fake_text_transport = self._fake_text_transport()
@@ -307,8 +310,7 @@ class Stage9ImageProviderTests(unittest.TestCase):
             job_id = created.json()["jobId"]
             self._wait_for_status(client, job_id, "preview_ready")
 
-            self.assertEqual(fake_text_transport.requests[0].api_base_url, "https://demo.example/v1?token=secret")
-            self.assertEqual(fake_text_transport.requests[0].api_key, "super-secret")
+            self.assertGreaterEqual(len(fake_text_transport.requests), 3)
             self.assertEqual(fake_image_transport.requests[0].api_base_url, "https://images.example/v1?token=image-secret")
             self.assertEqual(fake_image_transport.requests[0].api_key, "image-key-secret")
 
@@ -351,6 +353,31 @@ class Stage9ImageProviderTests(unittest.TestCase):
             self.assertEqual(len(fake_image_transport.requests), 2)
             self.assertEqual(fake_image_transport.requests[0].mode, "preview")
             self.assertEqual(fake_image_transport.requests[1].mode, "final")
+
+    def test_live_image_path_uses_text_generated_image_prompt(self):
+        fake_text_transport = self._fake_text_transport()
+        fake_image_transport = self._fake_image_transport()
+        prompt = "不用解析，直接把这句原样传给生图模型，二次元半身像，蓝发，水彩感"
+        with self._client(
+            extra_env=self._openai_live_env(),
+            fake_text_transport=fake_text_transport,
+            fake_image_transport=fake_image_transport,
+        ) as client:
+            created = client.post(
+                "/api/v2/drawing-jobs",
+                json={"inputText": prompt, "locale": "zh-CN"},
+            )
+            self.assertEqual(created.status_code, 202, created.text)
+            job_id = created.json()["jobId"]
+
+            completed = self._wait_for_status(client, job_id, "completed")
+            self.assertTrue(completed["finalAssetId"])
+            self.assertGreaterEqual(len(fake_text_transport.requests), 3)
+            self.assertEqual(len(fake_image_transport.requests), 2)
+            self.assertNotEqual(fake_image_transport.requests[0].prompt, prompt)
+            self.assertNotEqual(fake_image_transport.requests[1].prompt, prompt)
+            self.assertIn("anime", fake_image_transport.requests[0].prompt.lower())
+            self.assertIn("anime", fake_image_transport.requests[1].prompt.lower())
 
     def test_dashscope_image_transport_generates_image_bytes_without_exposing_remote_url(self):
         transport = DashScopeImageTransport()

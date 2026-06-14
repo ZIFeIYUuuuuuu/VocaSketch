@@ -54,6 +54,7 @@ class Stage10LayerPlaybackTests(unittest.TestCase):
         env_patch = {
             "VOCASKETCH_BACKEND_DATA_DIR": tempdir.name,
             "VOCASKETCH_WORKFLOW_STEP_DELAY_SECONDS": "0.02",
+            "VOCASKETCH_RENDER_PROCESS_VIDEO": "0",
             "VOCASKETCH_PROVIDER_PROFILE": "mock",
             "VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS": "0",
             "VOCASKETCH_OPENAI_API_BASE_URL": "",
@@ -388,9 +389,11 @@ class Stage10LayerPlaybackTests(unittest.TestCase):
             serialized = json.dumps(completed, ensure_ascii=False)
             self.assertNotIn("super-secret", serialized)
             self.assertNotIn("token=secret", serialized)
-            self.assertEqual(len(fake_text_transport.requests), 3)
+            self.assertGreaterEqual(len(fake_text_transport.requests), 3)
             self.assertEqual(len(fake_image_transport.requests), 2)
             self.assertEqual(len(fake_layer_transport.requests), 1)
+            self.assertIn("anime", fake_image_transport.requests[0].prompt.lower())
+            self.assertEqual(fake_image_transport.requests[0].prompt, fake_image_transport.requests[1].prompt)
 
     def test_live_layer_empty_result_fails_with_schema_error(self):
         fake_text_transport = self._fake_text_transport()

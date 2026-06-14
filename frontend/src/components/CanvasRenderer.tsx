@@ -182,23 +182,23 @@ export const CanvasRenderer: React.FC<CanvasRendererProps> = ({
     }
 
     const random = createSeededRandom(lightMode ? 4217 : 9321);
-    textureCtx.fillStyle = lightMode ? '#fffdf8' : '#111216';
+    textureCtx.fillStyle = lightMode ? '#ffffff' : '#111216';
     textureCtx.fillRect(0, 0, width, height);
 
     for (let y = 0; y < height; y += 3) {
       for (let x = 0; x < width; x += 3) {
         const noise = random();
         if (noise > 0.72) {
-          textureCtx.fillStyle = lightMode ? 'rgba(30, 41, 59, 0.035)' : 'rgba(255, 255, 255, 0.045)';
+          textureCtx.fillStyle = lightMode ? 'rgba(30, 41, 59, 0.012)' : 'rgba(255, 255, 255, 0.045)';
           textureCtx.fillRect(x, y, 1, 1);
         } else if (noise < 0.08) {
-          textureCtx.fillStyle = lightMode ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.12)';
+          textureCtx.fillStyle = lightMode ? 'rgba(255, 255, 255, 0.45)' : 'rgba(0, 0, 0, 0.12)';
           textureCtx.fillRect(x, y, 1, 1);
         }
       }
     }
 
-    textureCtx.globalAlpha = lightMode ? 0.05 : 0.08;
+    textureCtx.globalAlpha = lightMode ? 0.012 : 0.08;
     textureCtx.strokeStyle = lightMode ? '#334155' : '#e2e8f0';
     for (let y = 0; y < height; y += 18) {
       textureCtx.beginPath();

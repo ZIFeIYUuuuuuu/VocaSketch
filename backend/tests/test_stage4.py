@@ -31,6 +31,7 @@ class Stage4BackendTests(unittest.TestCase):
         env_patch = {
             "VOCASKETCH_BACKEND_DATA_DIR": tempdir.name,
             "VOCASKETCH_WORKFLOW_STEP_DELAY_SECONDS": "0.02",
+            "VOCASKETCH_RENDER_PROCESS_VIDEO": "0",
             "VOCASKETCH_PROVIDER_PROFILE": "mock",
             "VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS": "0",
             "VOCASKETCH_OPENAI_API_BASE_URL": "",
@@ -108,7 +109,7 @@ class Stage4BackendTests(unittest.TestCase):
             job_id = created.json()["jobId"]
 
             preview = self._wait_for_status(client, job_id, "preview_ready")
-            self.assertTrue(preview["requiresConfirmation"])
+            self.assertFalse(preview["requiresConfirmation"])
 
             confirmed = client.post(
                 f"/api/v2/drawing-jobs/{job_id}/confirm",

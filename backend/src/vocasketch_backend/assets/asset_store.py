@@ -88,6 +88,33 @@ class AssetStore:
         )
         return await self._create_asset(job_id, spec)
 
+    async def save_process_video(
+        self,
+        job_id: str,
+        *,
+        content_bytes: bytes,
+        width: int,
+        height: int,
+        duration_ms: int,
+        metadata: dict | None = None,
+    ) -> AssetRecord:
+        spec = GeneratedAssetSpec(
+            kind="process_video",
+            role="process_video",
+            label="Drawing Process Video",
+            mime_type="video/mp4",
+            width=width,
+            height=height,
+            content_bytes=content_bytes,
+            file_extension="mp4",
+            metadata={
+                "mode": "backend-rendered-process-video",
+                "durationMs": duration_ms,
+                **(metadata or {}),
+            },
+        )
+        return await self._create_asset(job_id, spec)
+
     async def _create_asset(self, job_id: str, spec: GeneratedAssetSpec) -> AssetRecord:
         validate_safe_identifier(job_id)
         asset_id = self._make_asset_id()
@@ -164,6 +191,8 @@ class AssetStore:
             return "webp"
         if spec.mime_type == "application/json":
             return "json"
+        if spec.mime_type == "video/mp4":
+            return "mp4"
         if spec.mime_type.startswith("text/"):
             return "txt"
         return "bin"

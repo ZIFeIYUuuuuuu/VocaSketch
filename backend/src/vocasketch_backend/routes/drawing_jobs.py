@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, Query, Request, status
 from fastapi.responses import StreamingResponse
 
+from ..assets.asset_store import AssetContentMissingError
 from ..errors import api_error, redact_text, sanitize_error_payload
 from ..job_store import InvalidIdentifierError
 from ..models import (
@@ -19,6 +22,14 @@ from ..models import (
     JobError,
     JobErrorSummary,
     JobStatus,
+)
+from ..providers.process_playback import (
+    PROCESS_PLAYBACK_VERSION,
+    PROCESS_VIDEO_FPS,
+    PROCESS_VIDEO_HEIGHT,
+    PROCESS_VIDEO_WIDTH,
+    enrich_manifest_with_process,
+    render_process_video_bytes,
 )
 from ..workflow import WorkflowStateError
 
@@ -83,7 +94,7 @@ async def list_drawing_jobs(
     if status_filter is not None:
         jobs = [job for job in jobs if job.status == status_filter]
 
-    jobs.sort(key=lambda job: job.updatedAt, reverse=True)
+    jobs.sort(key=lambda job: job.createdAt, reverse=True)
     summaries = [_to_summary(job) for job in jobs[:limit]]
     return DrawingJobListResponse(items=summaries, limit=limit, status=status_filter)
 
@@ -107,6 +118,7 @@ async def get_drawing_job(job_id: str, request: Request) -> DrawingJobResponse:
             message="drawing job not found",
             details={"jobId": job_id},
         )
+    job = await _maybe_refresh_playback_process(request, job)
     return _to_response(job)
 
 
@@ -267,6 +279,109 @@ def _to_response(job: DrawingJob) -> DrawingJobResponse:
         payload["error"] = sanitize_error_payload(payload["error"])
     payload["eventsUrl"] = f"/api/v2/drawing-jobs/{job.jobId}/events"
     return DrawingJobResponse.model_validate(payload)
+
+
+async def _maybe_refresh_playback_process(request: Request, job: DrawingJob) -> DrawingJob:
+    if job.playbackManifest is None or not job.finalAssetId:
+        return job
+
+    asset_store = request.app.state.asset_store
+    final_asset = await asset_store.get_asset(job.finalAssetId)
+    if final_asset is None:
+        return job
+
+    preview_asset = None
+    if job.previewAssetId:
+        preview_asset = await asset_store.get_asset(job.previewAssetId)
+    lineart_asset = None
+    lineart_layer = next(
+        (layer for layer in job.layerAssets if layer.role == "lineart" and layer.metadata.get("mode") == "model-clean-lineart"),
+        None,
+    )
+    if lineart_layer is not None:
+        lineart_asset = await asset_store.get_asset(lineart_layer.assetId)
+
+    final_content_path = await _optional_asset_content_path(asset_store, job.finalAssetId)
+    preview_content_path = (
+        await _optional_asset_content_path(asset_store, job.previewAssetId)
+        if job.previewAssetId
+        else None
+    )
+    lineart_content_path = await _optional_asset_content_path(asset_store, lineart_layer.assetId) if lineart_layer else None
+
+    original_process = job.playbackManifest.process
+    source = original_process.get("source") if original_process and isinstance(original_process.get("source"), dict) else {}
+    if original_process and original_process.get("version") == PROCESS_PLAYBACK_VERSION and not source.get("processVideoContentUrl"):
+        refreshed = job.playbackManifest
+    else:
+        refreshed = enrich_manifest_with_process(
+            job.playbackManifest,
+            preview_asset=preview_asset,
+            final_asset=final_asset,
+            lineart_asset=lineart_asset,
+            preview_content_path=preview_content_path,
+            final_content_path=final_content_path,
+            lineart_content_path=lineart_content_path,
+        )
+    if refreshed.process and final_content_path is not None and _should_render_process_video():
+        source = refreshed.process.get("source") if isinstance(refreshed.process.get("source"), dict) else {}
+        if not source.get("processVideoContentUrl"):
+            video_bytes = render_process_video_bytes(
+                refreshed.process,
+                final_content_path=final_content_path,
+                preview_content_path=preview_content_path,
+            )
+            if video_bytes:
+                video_asset = await asset_store.save_process_video(
+                    job.jobId,
+                    content_bytes=video_bytes,
+                    width=PROCESS_VIDEO_WIDTH,
+                    height=PROCESS_VIDEO_HEIGHT,
+                    duration_ms=refreshed.durationMs,
+                    metadata={
+                        "processVersion": refreshed.process.get("version"),
+                        "fps": PROCESS_VIDEO_FPS,
+                        "sourceFinalAssetId": final_asset.assetId,
+                    },
+                )
+                process = dict(refreshed.process)
+                process_source = dict(source)
+                process_source.update(
+                    {
+                        "processVideoAssetId": video_asset.assetId,
+                        "processVideoContentUrl": video_asset.contentUrl,
+                        "processVideoMimeType": video_asset.mimeType,
+                    }
+                )
+                process["source"] = process_source
+                process["renderer"] = "backend-rendered-process-video"
+                refreshed = refreshed.model_copy(update={"process": process})
+    if refreshed is job.playbackManifest:
+        return job
+
+    manifest_asset = await asset_store.save_playback_manifest(job.jobId, refreshed)
+    updated_job = job.model_copy(
+        update={
+            "playbackManifest": refreshed,
+            "playbackManifestAssetId": manifest_asset.assetId,
+        }
+    )
+    await request.app.state.job_store.save_job(updated_job)
+    return updated_job
+
+
+async def _optional_asset_content_path(asset_store, asset_id: str | None):
+    if not asset_id:
+        return None
+    try:
+        handle = await asset_store.get_asset_content(asset_id)
+    except (AssetContentMissingError, InvalidIdentifierError):
+        return None
+    return handle.absolute_path if handle else None
+
+
+def _should_render_process_video() -> bool:
+    return os.getenv("VOCASKETCH_RENDER_PROCESS_VIDEO", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _parse_event_after_seq(*, after_seq: str | None, since_seq: str | None) -> int:

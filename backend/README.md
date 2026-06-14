@@ -2,15 +2,48 @@
 
 ## Process Playback Manifest
 
-- `build_playback_manifest_node` 会在保存 manifest 前补充 `process-v1` 动作时间轴。
-- `process` 不保存 mp4，也不把大块 mask/envelope 写进 JSON；它只描述前端可消费的轻量动作：
+- `build_playback_manifest_node` 会在保存 manifest 前补充当前 `process-v15` 动作时间轴。
+- 默认产品路径会生成一个后端渲染的 `process_video` MP4 asset；前端优先播放 `process.source.processVideoContentUrl`，没有视频时才回退到 canvas 动作渲染。
+- `process` 不把大块 mask/envelope 写进 JSON；它只描述可诊断、可回退的轻量动作：
   - `stroke`: 草图/线稿笔迹生长
   - `fillRegion`: 平涂区域中心扩散
   - `maskReveal`: 阴影/光照蒙版式显现
   - `layerBadge`: `Layer: Multiply` / `Layer: Add / Glow`
-  - `eyeSpark`: 最终眼神高光点睛
-- 前端使用同一张 final image 结合 canvas/filter/mask 来播放过程，因此角色和构图不会在阶段之间漂移。
+  - `finalReveal`: 最终成稿揭示
+- 如果启用模型线稿，流程会变成：final 彩色图 -> Gemini clean lineart -> lineart 向量化 / stroke 排序 -> 后端 MP4 过程视频 -> 前端播放。
+- 未启用模型线稿时，后端会继续从 final/preview 图本地提取线稿并生成过程视频。
 - 默认 provider profile 仍是 `mock`；process playback 生成不联网，也不调用真实外部模型。
+
+## 可选 Gemini Clean Lineart
+
+模型线稿用于让绘画过程更接近“先画完整线稿，再上色”的效果。默认关闭，不会联网。
+
+启用条件：
+
+```powershell
+set VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS=1
+set VOCASKETCH_ENABLE_MODEL_LINEART=1
+set VOCASKETCH_LINEART_PROVIDER=gemini
+set VOCASKETCH_LINEART_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta
+set VOCASKETCH_LINEART_API_KEY=<your-gemini-api-key>
+set VOCASKETCH_LINEART_MODEL=<gemini-image-model>
+set VOCASKETCH_RENDER_PROCESS_VIDEO=1
+```
+
+安全边界：
+
+- API key 不会写入 runtime info、job metadata、events 或 asset metadata。
+- 模型线稿输出会保存为 `lineart` layer asset，metadata mode 为 `model-clean-lineart`。
+- `playbackManifest.process.source.lineartAssetId` / `lineartContentUrl` 会指向这张干净线稿图。
+- 如果模型线稿未配置，默认回到离线本地提取路径。
+
+## v2 默认主流程
+
+- 用户确认绘图指令后，后端创建 drawing job 并自动推进完整链路。
+- `preview_ready` 仍会作为内部构图事件与快照状态短暂出现，便于诊断和兼容旧事件消费者。
+- `requiresConfirmation=false` 是默认行为；preview 不再作为用户可见断点。
+- live image 模式下，如果配置齐全，preview/final 会使用真实 image transport；否则默认仍是 mock/offline。
+- live image 已启用时，文本节点会先执行 intent parsing / visual brief / image prompt，生图请求使用文本模型整理后的 `imagePrompt.positivePrompt`。
 
 ## Stage 15 Cancel / Retry / Timeout Consistency
 
@@ -69,7 +102,7 @@
 - 可选真实 LLM 文本节点边界
 - 可选真实 image provider 边界
 - File-backed asset content 层
-- `preview_ready` 断点确认
+- `preview_ready` 作为内部构图里程碑，默认不再要求用户确认，会自动继续生成 final / layers / playback
 - `confirm` / `cancel` / `retry` 基础控制
 - Runtime readiness / provider mode 只读信息
 - 更明确的 provider 配置校验与 job failed 事件观测信息
