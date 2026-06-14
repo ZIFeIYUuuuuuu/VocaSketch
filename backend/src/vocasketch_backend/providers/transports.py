@@ -183,12 +183,6 @@ class OpenAICompatibleImageTransport:
             "size": request.size,
             "response_format": "b64_json",
         }
-        if request.negative_prompt:
-            payload["negative_prompt"] = request.negative_prompt
-        if request.quality:
-            payload["quality"] = request.quality
-        if request.seed is not None:
-            payload["seed"] = request.seed
 
         body = json.dumps(payload).encode("utf-8")
         target_url = request.api_base_url.rstrip("/") + "/images/generations"

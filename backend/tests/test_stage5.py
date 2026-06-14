@@ -31,6 +31,7 @@ class Stage5ProviderTests(unittest.TestCase):
         env_patch = {
             "VOCASKETCH_BACKEND_DATA_DIR": tempdir.name,
             "VOCASKETCH_WORKFLOW_STEP_DELAY_SECONDS": "0.02",
+            "VOCASKETCH_RENDER_PROCESS_VIDEO": "0",
         }
         if extra_env:
             env_patch.update(extra_env)
@@ -100,7 +101,7 @@ class Stage5ProviderTests(unittest.TestCase):
             job_id = created.json()["jobId"]
 
             preview = self._wait_for_status(client, job_id, "preview_ready")
-            self.assertTrue(preview["requiresConfirmation"])
+            self.assertFalse(preview["requiresConfirmation"])
 
             confirmed = client.post(f"/api/v2/drawing-jobs/{job_id}/confirm", json={"notes": "stage5 mock profile"})
             self.assertEqual(confirmed.status_code, 200, confirmed.text)
@@ -218,7 +219,6 @@ class Stage5ProviderTests(unittest.TestCase):
                 "intent.ready",
                 "prompt.ready",
                 "preview.ready",
-                "job.confirmed",
                 "final.ready",
                 "layers.ready",
                 "playback.ready",

@@ -29,6 +29,20 @@ import {
   restartPlaybackAt,
   resumePlaybackAt,
 } from './utils/playback.js';
+import {
+  buildV2ConfirmationMessage,
+  V2_PROGRESS_STEPS,
+  describeV2Error,
+  formatV2JobTime,
+  getV2AssetReadinessLabel,
+  getV2ErrorDiagnostic,
+  getV2FrameStepLabel,
+  getV2ProcessPhaseLabel,
+  getV2UserStatus,
+  isTerminalV2Status,
+  shouldAutoRestoreV2Job,
+  summarizeV2Input,
+} from './utils/v2DrawingJob.js';
 import { CharacterConfig, DrawStage, PaintLayer, SystemState, VoiceLog } from './types';
 import {
   buildAssetContentUrl,
@@ -78,9 +92,10 @@ const SESSION_STORAGE_KEY = 'vocasketch.sessionId';
 const PROJECT_STORAGE_KEY = 'vocasketch.projectId';
 const V2_JOB_STORAGE_KEY = 'vocasketch.v2JobId';
 const V2_EVENT_SEQ_STORAGE_KEY = 'vocasketch.v2LastEventSeq';
-const AUTO_RECORD_MAX_MS = 6500;
+const AUTO_RECORD_MAX_MS = 30000;
 const AUTO_RECORD_MIN_MS = 900;
-const SILENCE_AFTER_SPEECH_MS = 950;
+const NO_SPEECH_IDLE_TIMEOUT_MS = 5000;
+const SILENCE_AFTER_SPEECH_MS = 5000;
 const SPEECH_LEVEL_THRESHOLD = 0.035;
 const STAGE_BOUNDARIES = {
   sketchDone: 25,
@@ -89,7 +104,6 @@ const STAGE_BOUNDARIES = {
   watercolorDone: 90
 } as const;
 type RedrawTarget = 'hair' | 'eyes' | 'expression' | 'outfit' | 'accessory' | 'background';
-const V2_TERMINAL_STATUSES: JobStatus[] = ['completed', 'failed', 'cancelled'];
 const ENABLE_V2_VOICE_DRAWING = import.meta.env.VITE_ENABLE_V2_VOICE_DRAWING !== 'false';
 const ENABLE_LEGACY_V1_BACKEND = import.meta.env.VITE_ENABLE_LEGACY_V1_BACKEND === 'true';
 
@@ -116,6 +130,7 @@ export default function App() {
   const [isAwaitingConfirm, setIsAwaitingConfirm] = useState<boolean>(false);
   const [pendingVerb, setPendingVerb] = useState<'create' | 'edit' | 'accessory' | null>(null);
   const [pendingInterpretation, setPendingInterpretation] = useState<CommandInterpretation | null>(null);
+  const [pendingV2PromptText, setPendingV2PromptText] = useState<string | null>(null);
 
   // Layout Layers state
   const [layers, setLayers] = useState<PaintLayer[]>([
@@ -185,6 +200,11 @@ export default function App() {
   const realtimeFinalTranscriptRef = useRef<string>('');
   const realtimePartialTranscriptRef = useRef<string>('');
   const realtimeStoppingRef = useRef<boolean>(false);
+  const webSpeechFinalTranscriptRef = useRef<string>('');
+  const webSpeechInterimTranscriptRef = useRef<string>('');
+  const webSpeechSilenceTimerRef = useRef<number | null>(null);
+  const webSpeechStopRequestedRef = useRef<boolean>(false);
+  const webSpeechFinalizeGuardRef = useRef<boolean>(false);
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
   const recorderStopRequestedRef = useRef<boolean>(false);
   const recorderStopHandledRef = useRef<boolean>(false);
@@ -287,7 +307,6 @@ export default function App() {
     v2LastEventSeqRef.current = 0;
   };
 
-  const isTerminalV2Status = (status?: JobStatus | null) => !!status && V2_TERMINAL_STATUSES.includes(status);
   const shouldAutoAdvanceV2Frames = (job: DrawingJob) =>
     job.status === 'preview_ready' && !job.finalAssetId && !job.playbackManifestAssetId;
 
@@ -302,19 +321,8 @@ export default function App() {
       code?: string;
       retryable?: boolean;
     };
-    setV2UiError(error instanceof Error ? error.message : fallbackMessage);
-
-    const fragments: string[] = [];
-    if (apiError.status) {
-      fragments.push(`status ${apiError.status}`);
-    }
-    if (apiError.code) {
-      fragments.push(apiError.code);
-    }
-    if (typeof apiError.retryable === 'boolean') {
-      fragments.push(`retryable ${apiError.retryable ? 'yes' : 'no'}`);
-    }
-    setV2UiErrorDiagnostic(fragments.length > 0 ? fragments.join(' · ') : null);
+    setV2UiError(apiError.code ? describeV2Error(apiError) : error instanceof Error ? error.message : fallbackMessage);
+    setV2UiErrorDiagnostic(getV2ErrorDiagnostic(null, apiError));
   };
 
   const persistV2CurrentJob = (jobId: string) => {
@@ -397,33 +405,63 @@ export default function App() {
     setV2PlaybackManifestAsset(manifestAsset);
   };
 
+  const clearWebSpeechSilenceTimer = () => {
+    if (webSpeechSilenceTimerRef.current !== null) {
+      window.clearTimeout(webSpeechSilenceTimerRef.current);
+      webSpeechSilenceTimerRef.current = null;
+    }
+  };
+
+  const finalizeWebSpeechTranscript = (transcriptOverride?: string) => {
+    if (webSpeechFinalizeGuardRef.current) {
+      return;
+    }
+    webSpeechFinalizeGuardRef.current = true;
+    const transcript = (transcriptOverride ?? webSpeechFinalTranscriptRef.current ?? '').trim();
+    clearWebSpeechSilenceTimer();
+    webSpeechStopRequestedRef.current = false;
+    recognitionRef.current = null;
+    setIsListening(false);
+    if (transcript) {
+      setUserSpeechSub(transcript);
+      setSystemState('等待确认');
+      pushLog('system', `语音识别完成，等待确认：${transcript}`);
+      requestV2DrawingConfirmation(transcript);
+      return;
+    }
+    setSystemState('等待指令');
+    setUserSpeechSub('没有听到有效语音，请再试一次。');
+  };
+
+  const scheduleWebSpeechFinalize = () => {
+    clearWebSpeechSilenceTimer();
+    webSpeechSilenceTimerRef.current = window.setTimeout(() => {
+      const transcript =
+        webSpeechFinalTranscriptRef.current.trim() || webSpeechInterimTranscriptRef.current.trim();
+      const recognition = recognitionRef.current;
+      webSpeechStopRequestedRef.current = true;
+      if (recognition) {
+        try {
+          recognition.stop();
+        } catch {
+          // ignore stop race
+        }
+      }
+      finalizeWebSpeechTranscript(transcript);
+    }, SILENCE_AFTER_SPEECH_MS);
+  };
+
   const describeV2Status = (job: DrawingJob) => {
-    if (job.status === 'preview_ready' && job.requiresConfirmation) {
-      return '内部构图已完成，正在自动进入绘画过程帧生成。';
-    }
-    if (job.status === 'preview_ready') {
-      return '内部构图已完成，正在生成绘画过程帧。';
-    }
-    if (job.status === 'final_generating') {
-      return '正在生成最终图，完成后会直接展示绘画过程帧。';
-    }
-    if (job.status === 'layers_generating' || job.status === 'layers_ready' || job.status === 'playback_ready') {
-      return '正在整理 10% 到 100% 的绘画过程帧。';
-    }
-    if (job.status === 'completed') {
-      return '绘画过程帧已完成，可以查看和回放。';
-    }
-    if (job.status === 'failed') {
-      return job.error?.message ?? 'drawing job 失败';
-    }
-    if (job.status === 'cancelled') {
-      return 'drawing job 已取消。';
-    }
-    return `当前状态：${job.status}（${job.progressPercent}%）`;
+    return getV2UserStatus(job).message;
   };
 
   const autoAdvanceV2Frames = async (job: DrawingJob) => {
     if (!shouldAutoAdvanceV2Frames(job) || v2AutoAdvanceJobIdRef.current === job.jobId) {
+      return;
+    }
+
+    if (!job.requiresConfirmation) {
+      setV2FlowMessage('内部构图完成，正在继续生成 10% 到 100% 帧。');
       return;
     }
 
@@ -454,12 +492,13 @@ export default function App() {
     }
   };
 
-  const refreshV2JobSnapshot = async (jobId: string) => {
+  const refreshV2JobSnapshot = async (jobId: string, options: { force?: boolean } = {}) => {
     const job = await getDrawingJob(jobId);
-    if (v2ActiveJobIdRef.current !== jobId) {
+    if (v2ActiveJobIdRef.current !== jobId && !options.force) {
       return job;
     }
 
+    v2ActiveJobIdRef.current = jobId;
     setV2Job(job);
     persistV2CurrentJob(job.jobId);
     clearV2UiError();
@@ -630,16 +669,18 @@ export default function App() {
           lastSpeechAtRef.current = now;
         }
 
-        if (
-          hasDetectedSpeechRef.current &&
-          elapsed > AUTO_RECORD_MIN_MS &&
-          now - lastSpeechAtRef.current > SILENCE_AFTER_SPEECH_MS
-        ) {
+        const silenceMs = now - lastSpeechAtRef.current;
+        if (hasDetectedSpeechRef.current && elapsed > AUTO_RECORD_MIN_MS && silenceMs > SILENCE_AFTER_SPEECH_MS) {
           requestRecorderStop('silence');
           return;
         }
 
-        if (elapsed > AUTO_RECORD_MAX_MS) {
+        if (!hasDetectedSpeechRef.current && elapsed > NO_SPEECH_IDLE_TIMEOUT_MS) {
+          requestRecorderStop('timeout');
+          return;
+        }
+
+        if (elapsed > AUTO_RECORD_MAX_MS && (!hasDetectedSpeechRef.current || silenceMs > SILENCE_AFTER_SPEECH_MS)) {
           requestRecorderStop('timeout');
         }
       }, 120);
@@ -729,6 +770,27 @@ export default function App() {
     setV2PromptText(transcript);
   };
 
+  const requestV2DrawingConfirmation = (rawPrompt: string) => {
+    const prompt = rawPrompt.trim();
+    if (!prompt) {
+      setV2UiError('请先输入或填入一段用于 v2 生成的描述文本。');
+      setV2UiErrorDiagnostic(null);
+      return;
+    }
+
+    clearV2UiError();
+    setV2PromptText(prompt);
+    setPendingV2PromptText(prompt);
+    setPendingConfig(null);
+    setPendingVerb(null);
+    setPendingInterpretation(null);
+    setIsAwaitingConfirm(true);
+    setSystemState('等待确认');
+    const reply = buildV2ConfirmationMessage(prompt);
+    setAiSpeechSub(reply);
+    pushLog('ai', reply);
+  };
+
   const startV2DrawingJobFromText = async (rawPrompt: string) => {
     const prompt = rawPrompt.trim();
     if (isV2ActionBusy) {
@@ -747,7 +809,7 @@ export default function App() {
     setV2PlaybackManifestAsset(null);
     setV2LastEventType(null);
     setV2EventLog([]);
-    setV2FlowMessage('正在创建 drawing job...');
+    setV2FlowMessage('正在创建绘画任务，马上进入过程帧生成。');
     resetV2Tracking();
     resetV2Playback();
     clearPersistedV2EventSeq();
@@ -765,18 +827,23 @@ export default function App() {
       await refreshV2JobSnapshot(created.jobId);
       trackV2Job(created.jobId);
       void refreshV2RecentJobs({ silent: true });
-      pushLog('system', `V2 drawing job 已创建：${created.jobId}`);
+      pushLog('system', `V2 绘画任务已创建：${created.jobId}`);
     } catch (error) {
       console.error('Creating v2 drawing job failed.', error);
       setV2ErrorFromUnknown(error, '创建 v2 drawing job 失败。');
-      setV2FlowMessage('未能创建 drawing job。');
+      setV2FlowMessage('未能创建绘画任务。');
     } finally {
       setIsV2Submitting(false);
     }
   };
 
   const handleStartV2DrawingJob = async () => {
-    await startV2DrawingJobFromText(v2PromptText);
+    const prompt = v2PromptText.trim();
+    if (isAwaitingConfirm && pendingV2PromptText?.trim() === prompt) {
+      await handleConfirmAction();
+      return;
+    }
+    requestV2DrawingConfirmation(prompt);
   };
 
   const handleRetryV2DrawingJob = async () => {
@@ -893,12 +960,22 @@ export default function App() {
 
     try {
       v2ActiveJobIdRef.current = savedJobId;
-      const job = await refreshV2JobSnapshot(savedJobId);
-      if (!isTerminalV2Status(job.status)) {
+      const job = await getDrawingJob(savedJobId);
+      if (!shouldAutoRestoreV2Job(job)) {
+        v2ActiveJobIdRef.current = null;
+        clearPersistedV2Job();
+        setV2Job(null);
+        setV2FinalAsset(null);
+        setV2PlaybackManifestAsset(null);
+        setV2FlowMessage('上次任务已完成，已放入 Recent Jobs，可手动打开历史查看。');
+        void refreshV2RecentJobs({ silent: true });
+        return;
+      }
+
+      const restored = await refreshV2JobSnapshot(savedJobId, { force: true });
+      if (!isTerminalV2Status(restored.status)) {
         setV2FlowMessage('已恢复上次任务，正在继续跟踪。');
         trackV2Job(savedJobId, { afterSeq: savedAfterSeq });
-      } else if (isTerminalV2Status(job.status)) {
-        setV2FlowMessage(`已恢复历史任务：${describeV2Status(job)}`);
       }
     } catch (error) {
       console.error('Restoring persisted v2 drawing job failed.', error);
@@ -1119,16 +1196,16 @@ export default function App() {
     if (!text) return;
 
     const isControlCommand = /^(确定|确认|取消|放弃|不要了|暂停|停一下|先停|继续|接着|回放|重新放|重演|撤销|上一步|撤消|重做|恢复下一步|前进)\b/.test(text);
-    if (!isControlCommand) {
-      setV2PromptText(text);
-    }
-
     if (ENABLE_V2_VOICE_DRAWING && !isControlCommand) {
       pushLog('user', text);
       setUserSpeechSub(text);
-      pushLog('system', '已将语音绘图描述发送到 Python v2 Drawing Job。');
-      await startV2DrawingJobFromText(text);
+      pushLog('system', '已识别语音绘图描述，等待用户确认后再创建 Python v2 Drawing Job。');
+      requestV2DrawingConfirmation(text);
       return;
+    }
+
+    if (!isControlCommand) {
+      setV2PromptText(text);
     }
 
     if (/确定|确认|ok|好的|开始|没错|绘制|可以/.test(text) && isAwaitingConfirm) {
@@ -1144,6 +1221,7 @@ export default function App() {
       setPendingConfig(null);
       setPendingVerb(null);
       setPendingInterpretation(null);
+      setPendingV2PromptText(null);
       setSystemState('等待指令');
       setUserSpeechSub(text);
       setAiSpeechSub('好的，已撤销当前的待办指令，随时为您待命。');
@@ -1219,22 +1297,19 @@ export default function App() {
         return;
       }
 
+      const confirmationReply = interpretation.aiReplyText.includes('确认')
+        ? interpretation.aiReplyText
+        : `${interpretation.aiReplyText} 请确认后我再开始执行。`;
+
       setPendingInterpretation(interpretation);
+      setPendingV2PromptText(null);
       setPendingConfig(resolveConfigFromOperations(interpretation.operations));
       setPendingVerb(interpretation.intent === 'create_avatar' ? 'create' : 'edit');
-      setIsAwaitingConfirm(interpretation.requiresConfirmation);
-      setAiSpeechSub(interpretation.aiReplyText);
-      pushLog('ai', interpretation.aiReplyText);
-      void playAssistantSpeech(interpretation.aiReplyText);
-      setSystemState(interpretation.requiresConfirmation ? '等待确认' : '等待指令');
-
-      if (!interpretation.requiresConfirmation) {
-        await applyConfirmedOperations(interpretation.operations, {
-          transcript: interpretation.transcript,
-          aiReplyText: interpretation.aiReplyText,
-          persist: false
-        });
-      }
+      setIsAwaitingConfirm(true);
+      setAiSpeechSub(confirmationReply);
+      pushLog('ai', confirmationReply);
+      void playAssistantSpeech(confirmationReply);
+      setSystemState('等待确认');
     } catch (error) {
       console.warn('Backend command interpretation failed; falling back to local parser.', error);
       pushLog('system', '后端指令解析暂不可用，切回本地语义解析。');
@@ -1268,6 +1343,7 @@ export default function App() {
         setPendingConfig(null);
         setPendingVerb(null);
         setPendingInterpretation(null);
+        setPendingV2PromptText(null);
         setSystemState('等待指令');
         setUserSpeechSub(text);
         setAiSpeechSub('好的，已撤销当前的待办指令，随时为您待命。');
@@ -1426,6 +1502,7 @@ export default function App() {
       // Store what we computed and ask user to confirm (P0 Req: Awaiting voice repetition/affirmation)
       setPendingConfig(nextConfig);
       setPendingInterpretation(null);
+      setPendingV2PromptText(null);
       setIsAwaitingConfirm(true);
 
       if (isCreation) {
@@ -1448,6 +1525,19 @@ export default function App() {
   // -------------------------------------------------------------------------
   const handleConfirmAction = async () => {
     if (!isAwaitingConfirm) return;
+
+    if (pendingV2PromptText) {
+      const prompt = pendingV2PromptText;
+      setIsAwaitingConfirm(false);
+      setPendingV2PromptText(null);
+      setPendingConfig(null);
+      setPendingVerb(null);
+      setPendingInterpretation(null);
+      setSystemState('思考中');
+      pushLog('system', '用户已确认，开始创建 Python v2 Drawing Job。');
+      await startV2DrawingJobFromText(prompt);
+      return;
+    }
 
     // Backup current traits to Undo history prior to execution
     setHistory((prev) => [...prev, characterConfig]);
@@ -1473,6 +1563,7 @@ export default function App() {
         setPendingConfig(null);
         setPendingVerb(null);
         setPendingInterpretation(null);
+        setPendingV2PromptText(null);
         setAiSpeechSub(confirmed.aiReplyText);
         void playAssistantSpeech(confirmed.aiReplyText);
 
@@ -1499,6 +1590,7 @@ export default function App() {
     setPendingConfig(null);
     setPendingVerb(null);
     setPendingInterpretation(null);
+    setPendingV2PromptText(null);
 
     // Apply the traits
     if (nextCfg) {
@@ -1966,6 +2058,15 @@ export default function App() {
   };
 
   const handleReplay = async () => {
+    const hasV2ProcessPlayback = !!v2Job?.playbackManifest?.durationMs && !!(v2Job.finalAssetId || v2FinalAsset);
+    if (hasV2ProcessPlayback) {
+      restartV2Playback();
+      setSystemState('绘画中');
+      setAiSpeechSub('正在从 10% 草图开始重放完整绘画过程。');
+      pushLog('system', '已将“重放过程”绑定到当前 Python v2 绘画过程播放器。');
+      return;
+    }
+
     if (ENABLE_LEGACY_V1_BACKEND && projectId && sessionId) {
       try {
         const projectHistory = await getProjectHistory({
@@ -2032,7 +2133,11 @@ export default function App() {
         requestRecorderStop('manual');
         return;
       }
-      recognitionRef.current?.stop();
+      clearWebSpeechSilenceTimer();
+      webSpeechStopRequestedRef.current = true;
+      const recognition = recognitionRef.current;
+      recognitionRef.current = null;
+      recognition?.stop();
       setIsListening(false);
       setSystemState('等待指令');
       pushLog('system', '麦克风监听关闭。');
@@ -2040,7 +2145,7 @@ export default function App() {
     }
 
     if (ENABLE_V2_VOICE_DRAWING) {
-      startWebSpeechFallback('Python v2 语音绘图模式：使用浏览器识别，结果直接发送到 backend。');
+      startWebSpeechFallback('Python v2 语音绘图模式：使用浏览器识别，静音 5 秒后等待确认。');
       return;
     }
 
@@ -2067,6 +2172,10 @@ export default function App() {
   };
 
   const startRealtimeAsr = async () => {
+    if (ENABLE_V2_VOICE_DRAWING) {
+      startWebSpeechFallback('Python v2 语音绘图模式只使用浏览器识别。');
+      return;
+    }
     if (!sessionId || !projectId) {
       throw new Error('缺少 session/project，无法启动实时识别。');
     }
@@ -2256,6 +2365,10 @@ export default function App() {
   };
 
   const startRecordedAsrFallback = async (reason?: string) => {
+    if (ENABLE_V2_VOICE_DRAWING) {
+      startWebSpeechFallback(reason ?? 'Python v2 语音绘图模式只使用浏览器识别。');
+      return;
+    }
     if (reason) {
       pushLog('system', reason);
     }
@@ -2382,6 +2495,10 @@ export default function App() {
   };
 
   const handleRecordedAudio = async (audio: Blob) => {
+    if (ENABLE_V2_VOICE_DRAWING) {
+      startWebSpeechFallback('Python v2 语音绘图模式只使用浏览器识别。');
+      return;
+    }
     if (!ENABLE_LEGACY_V1_BACKEND) {
       startWebSpeechFallback('旧 Node/V1 录音 ASR 已移除，切换浏览器 Web Speech。');
       return;
@@ -2425,17 +2542,23 @@ export default function App() {
       setIsListening(true);
       setTimeout(() => {
         setIsListening(false);
-        interpretVoiceCommand('画一个蓝色长发的二次元女生半身头像，水彩素描风');
+        setSystemState('等待确认');
+        requestV2DrawingConfirmation('画一个蓝色长发的二次元女生半身头像，水彩素描风');
       }, 3000);
       return;
     }
 
     setMicError(null);
     setIsListening(true);
-    pushLog('system', '🎙️ 已进入浏览器 Web Speech 备用识别。');
+    pushLog('system', '🎙️ 已进入 Python v2 语音识别。说完后静音 5 秒，我会先等待您确认。');
+    webSpeechFinalTranscriptRef.current = '';
+    webSpeechInterimTranscriptRef.current = '';
+    webSpeechStopRequestedRef.current = false;
+    webSpeechFinalizeGuardRef.current = false;
+    clearWebSpeechSilenceTimer();
 
     const r = new SpeechRecognitionAPI();
-    r.continuous = false;
+    r.continuous = true;
     r.interimResults = true;
     r.lang = 'zh-CN';
 
@@ -2455,25 +2578,44 @@ export default function App() {
           interim += textResult;
         }
       }
-      const display = finalText || interim;
+      if (finalText.trim()) {
+        webSpeechFinalTranscriptRef.current = `${webSpeechFinalTranscriptRef.current} ${finalText}`.trim();
+      }
+      webSpeechInterimTranscriptRef.current = interim.trim();
+      const display =
+        `${webSpeechFinalTranscriptRef.current} ${webSpeechInterimTranscriptRef.current}`.trim() ||
+        finalText ||
+        interim;
       if (display) {
         setUserSpeechSub(display);
       }
-      if (finalText.trim()) {
-        interpretVoiceCommand(finalText);
-      }
+      scheduleWebSpeechFinalize();
     };
 
     r.onerror = (e: any) => {
       console.error('Speech recognition error', e);
       setMicError(`识别信号偏弱: ${e.error}`);
+      clearWebSpeechSilenceTimer();
       r.stop();
+      recognitionRef.current = null;
+      webSpeechStopRequestedRef.current = false;
+      webSpeechFinalizeGuardRef.current = false;
       setIsListening(false);
       setSystemState('等待指令');
     };
 
     r.onend = () => {
+      if (webSpeechStopRequestedRef.current) {
+        return;
+      }
+      const transcript =
+        webSpeechFinalTranscriptRef.current.trim() || webSpeechInterimTranscriptRef.current.trim();
+      if (transcript) {
+        scheduleWebSpeechFinalize();
+        return;
+      }
       setIsListening(false);
+      recognitionRef.current = null;
       if (systemState === '聆听中') {
         setSystemState('等待指令');
       }
@@ -2499,6 +2641,7 @@ export default function App() {
     (left, right) => left.order - right.order
   );
   const v2PlaybackProcess = v2Job?.playbackManifest?.process ?? null;
+  const v2PlaybackProcessPhases = v2PlaybackProcess?.phases ?? [];
   const v2PlaybackDurationMs = v2Job?.playbackManifest?.durationMs ?? 0;
   const v2PlaybackSignature = `${v2Job?.jobId ?? 'none'}:${v2Job?.playbackManifestAssetId ?? 'none'}`;
   const v2PlaybackLayers = v2PlaybackSteps
@@ -2529,10 +2672,26 @@ export default function App() {
       break;
     }
   }
+  let v2CurrentProcessPhaseIndex = -1;
+  for (let index = 0; index < v2PlaybackProcessPhases.length; index += 1) {
+    const phase = v2PlaybackProcessPhases[index];
+    if (v2PlaybackElapsedMs >= phase.startMs) {
+      v2CurrentProcessPhaseIndex = index;
+    } else {
+      break;
+    }
+  }
   const v2CurrentPlaybackStep =
     v2CurrentPlaybackStepIndex >= 0 ? v2PlaybackSteps[v2CurrentPlaybackStepIndex] : v2PlaybackSteps[0] ?? null;
+  const v2CurrentProcessPhase =
+    v2CurrentProcessPhaseIndex >= 0
+      ? v2PlaybackProcessPhases[v2CurrentProcessPhaseIndex]
+      : v2PlaybackProcessPhases[0] ?? null;
   const canRetryV2Job = v2Job?.status === 'failed' && !!v2Job.error?.retryable && !isV2ActionBusy;
   const canCancelV2Job = !!v2Job && !isTerminalV2Status(v2Job.status) && !isV2ActionBusy;
+  const isV2PromptAwaitingConfirmation = isAwaitingConfirm && pendingV2PromptText?.trim() === v2PromptText.trim() && !!v2PromptText.trim();
+  const v2UserStatus = getV2UserStatus(v2Job);
+  const v2JobErrorDiagnostic = v2Job?.error ? getV2ErrorDiagnostic(v2Job.error, null) : null;
   const v2ManifestStepCount = v2PlaybackSteps.length;
   const v2RuntimeModes = v2RuntimeReadiness?.provider.modes;
   const v2RuntimeNetworkLabel = v2RuntimeReadiness
@@ -2544,45 +2703,16 @@ export default function App() {
     : isV2RuntimeLoading
       ? 'loading'
       : 'unavailable';
-  const formatV2JobTime = (value?: string | null) => {
-    if (!value) {
-      return '--';
-    }
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) {
-      return '--';
-    }
-    return date.toLocaleString('zh-CN', {
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  };
-  const summarizeV2Input = (value: string) => {
-    const normalized = value.replace(/\s+/g, ' ').trim();
-    return normalized.length > 48 ? `${normalized.slice(0, 48)}...` : normalized || '(empty prompt)';
-  };
-
-  const getV2FrameStepLabel = (step: PlaybackManifestStep, index: number) => {
-    const roleLabels: Record<string, string> = {
-      sketch: '10% 草图',
-      lineart: '25% 线稿',
-      flat_color: '45% 平涂',
-      shadow: '65% 阴影',
-      lighting: '85% 光照',
-      details: '100% 完成'
-    };
-    const fallbackLabels = ['10% 草图', '25% 线稿', '45% 平涂', '65% 阴影', '85% 光照', '100% 完成'];
-    return roleLabels[step.role] ?? fallbackLabels[index] ?? step.label;
-  };
-
   const getV2PlaybackOpacity = (step: PlaybackManifestStep, stepIndex: number) => {
     return computeStepOpacity(step, v2PlaybackElapsedMs, stepIndex === v2PlaybackSteps.length - 1);
   };
   const v2PlaybackProgressPercent =
     v2PlaybackDurationMs > 0 ? Math.min((v2PlaybackElapsedMs / v2PlaybackDurationMs) * 100, 100) : 0;
-  const v2MainPlaybackLabel = v2CurrentPlaybackStep
+  const v2DisplayPlaybackStepIndex =
+    v2HasProcessPlayback && v2CurrentProcessPhaseIndex >= 0 ? v2CurrentProcessPhaseIndex : v2CurrentPlaybackStepIndex;
+  const v2MainPlaybackLabel = v2HasProcessPlayback && v2CurrentProcessPhase
+    ? getV2ProcessPhaseLabel(v2CurrentProcessPhase, Math.max(v2CurrentProcessPhaseIndex, 0))
+    : v2CurrentPlaybackStep
     ? getV2FrameStepLabel(v2CurrentPlaybackStep, Math.max(v2CurrentPlaybackStepIndex, 0))
     : '等待过程帧';
   const v2MainPlaybackSummary = v2HasPlayableManifest
@@ -2599,10 +2729,11 @@ export default function App() {
 
     stopV2PlaybackLoop();
     v2PlaybackStartedAtRef.current = null;
-    v2PlaybackBaseElapsedRef.current = 0;
-    setV2PlaybackElapsedMs(0);
-    setIsV2PlaybackRunning(v2Job?.status === 'completed' || v2Job?.status === 'playback_ready');
-  }, [v2PlaybackSignature, v2HasPlayableManifest, v2Job?.status]);
+    const initialElapsedMs = isTerminalV2Status(v2Job?.status) ? v2PlaybackDurationMs : 0;
+    v2PlaybackBaseElapsedRef.current = initialElapsedMs;
+    setV2PlaybackElapsedMs(initialElapsedMs);
+    setIsV2PlaybackRunning(false);
+  }, [v2PlaybackSignature, v2HasPlayableManifest, v2Job?.status, v2PlaybackDurationMs]);
 
   useEffect(() => {
     if (!isV2PlaybackRunning || !v2HasPlayableManifest) {
@@ -2749,8 +2880,8 @@ export default function App() {
                     <div>
                       <p className={`text-xs font-bold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>10% 到 100% 绘画过程</p>
                       <p className={`mt-1 text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
-                        step {Math.max(v2CurrentPlaybackStepIndex + 1, 1)} / {v2ManifestStepCount}
-                        {v2CurrentPlaybackStep ? ` · ${v2MainPlaybackLabel}` : ''}
+                        step {Math.max(v2DisplayPlaybackStepIndex + 1, 1)} / {v2ManifestStepCount}
+                        {v2HasPlayableManifest ? ` · ${v2MainPlaybackLabel}` : ''}
                       </p>
                     </div>
                     <div className="flex items-center gap-2">
@@ -2833,7 +2964,7 @@ export default function App() {
                     {v2PlaybackSteps.map((step, index) => (
                       <div
                         key={step.stepId}
-                        className={`rounded-lg border px-2.5 py-2 ${index === v2CurrentPlaybackStepIndex
+                        className={`rounded-lg border px-2.5 py-2 ${index === v2DisplayPlaybackStepIndex
                           ? isLightMode
                             ? 'bg-cyan-50 border-cyan-200'
                             : 'bg-cyan-950/20 border-cyan-500/40'
@@ -2870,6 +3001,7 @@ export default function App() {
                     setPendingConfig(null);
                     setPendingVerb(null);
                     setPendingInterpretation(null);
+                    setPendingV2PromptText(null);
                     setSystemState('等待指令');
                     setAiSpeechSub('好的，当前操作已取消，随时等候您的下一步指令。');
                     pushLog('ai', '已取消前面的操作。');
@@ -2920,7 +3052,7 @@ export default function App() {
                   <span>Python v2 Drawing Job</span>
                 </div>
                 <p className={`mt-1 text-[11px] leading-relaxed ${isLightMode ? 'text-slate-600' : 'text-slate-400'}`}>
-                  这条链路直接接到 `backend` 的异步 drawing job。提交后等待帧生成完成，再展示 10% 到 100% 的绘画过程。
+                  这条链路直接接到 `backend` 的异步绘画任务。确认后立即开始绘制，内部构图不会打断用户流程。
                 </p>
               </div>
               <span className={`text-[10px] font-mono px-2 py-1 rounded border ${isLightMode ? 'bg-slate-50 border-slate-200 text-slate-500' : 'bg-[#181822] border-[#2d2d3c] text-slate-400'}`}>
@@ -2962,7 +3094,7 @@ export default function App() {
 
             <div className="flex flex-col gap-2">
               <label className={`text-[11px] font-semibold ${isLightMode ? 'text-slate-700' : 'text-slate-300'}`}>
-                输入绘图描述，或直接用语音说一句；普通绘图描述会自动创建 Python v2 job
+                输入绘图描述，或直接用语音说一句；确认后才会正式开始绘制
               </label>
               <textarea
                 value={v2PromptText}
@@ -2995,7 +3127,7 @@ export default function App() {
                       : 'bg-cyan-500 text-slate-950 border-cyan-400 hover:bg-cyan-400'
                   }`}
                 >
-                  {isV2Submitting ? '创建中...' : '创建 v2 drawing job'}
+                  {isV2Submitting ? '创建中...' : isV2PromptAwaitingConfirmation ? '确认并开始绘制' : '准备绘制'}
                 </button>
                 <button
                   onClick={() => void handleCancelV2DrawingJob()}
@@ -3015,7 +3147,7 @@ export default function App() {
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <p className={`text-xs font-bold ${isLightMode ? 'text-slate-800' : 'text-slate-200'}`}>
-                    {v2Job ? `Job ${v2Job.jobId}` : '尚未创建任务'}
+                    {v2Job ? `${v2UserStatus.label} · ${v2Job.jobId}` : v2UserStatus.label}
                   </p>
                   <p className={`mt-1 text-[11px] ${isLightMode ? 'text-slate-600' : 'text-slate-400'}`}>
                     {v2UiError ?? v2FlowMessage}
@@ -3028,7 +3160,7 @@ export default function App() {
                 </div>
                 {v2Job && (
                   <span className={`text-[11px] font-mono px-2 py-1 rounded border ${isLightMode ? 'bg-white border-slate-200 text-slate-700' : 'bg-[#14141c] border-[#2b2b38] text-slate-300'}`}>
-                    {v2Job.status} · {v2Job.progressPercent}%
+                    {v2UserStatus.label} · {v2Job.progressPercent}%
                   </span>
                 )}
               </div>
@@ -3041,8 +3173,9 @@ export default function App() {
                     />
                   </div>
                   <div className={`mt-2 flex flex-wrap gap-2 text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                    <span>engine: {v2Job.status}</span>
                     <span>last event: {v2LastEventType ?? 'waiting'}</span>
-                    <span>{v2Job.requiresConfirmation ? '自动进入帧生成中' : '无需用户确认'}</span>
+                    <span>内部构图自动推进</span>
                     {v2Job.retryOfJobId && <span>retry of: {v2Job.retryOfJobId}</span>}
                   </div>
                 </>
@@ -3075,6 +3208,7 @@ export default function App() {
                 <div className="mt-3 grid grid-cols-1 gap-2">
                   {v2RecentJobs.map((job) => {
                     const isCurrentJob = v2Job?.jobId === job.jobId;
+                    const recentStatus = getV2UserStatus(job);
                     return (
                       <button
                         key={job.jobId}
@@ -3095,12 +3229,12 @@ export default function App() {
                             {summarizeV2Input(job.inputText)}
                           </p>
                           <span className={`shrink-0 text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
-                            {job.status} · {job.progressPercent}%
+                            {recentStatus.label} · {job.progressPercent}%
                           </span>
                         </div>
                         <div className={`mt-1 flex flex-wrap gap-2 text-[10px] font-mono ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
                           <span>{formatV2JobTime(job.updatedAt)}</span>
-                          <span>{job.playbackManifestAssetId ? 'frames ready' : job.finalAssetId ? 'final ready' : job.previewAssetId ? 'frame generation' : 'no asset yet'}</span>
+                          <span>{getV2AssetReadinessLabel(job)}</span>
                           {job.retryOfJobId && <span>retry of {job.retryOfJobId}</span>}
                           {job.error && <span>{job.error.code}</span>}
                         </div>
@@ -3112,18 +3246,42 @@ export default function App() {
             </div>
 
             {v2Job && !isTerminalV2Status(v2Job.status) && !v2HasPlayableManifest && (
-              <div className={`rounded-lg border p-3 text-[11px] ${isLightMode ? 'bg-cyan-50 border-cyan-200 text-cyan-700' : 'bg-cyan-950/20 border-cyan-500/30 text-cyan-200'}`}>
-                正在生成绘画过程帧。内部构图只在后端使用，用户侧直接等待 10% 到 100% 进度图。
+              <div className={`rounded-lg border p-3 ${isLightMode ? 'bg-cyan-50 border-cyan-200 text-cyan-700' : 'bg-cyan-950/20 border-cyan-500/30 text-cyan-200'}`}>
+                <p className="text-xs font-bold">绘画过程生成中</p>
+                <p className="mt-1 text-[11px] leading-relaxed">
+                  内部构图只在后端使用，用户侧直接等待 10% 到 100% 进度图。
+                </p>
+                <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {V2_PROGRESS_STEPS.map((step) => {
+                    const isReached = v2Job.progressPercent >= step.progressPercent;
+                    return (
+                      <div
+                        key={step.role}
+                        className={`rounded-md border px-2 py-2 text-[10px] font-mono ${
+                          isReached
+                            ? isLightMode
+                              ? 'bg-white border-cyan-300 text-cyan-800'
+                              : 'bg-cyan-500/10 border-cyan-400/40 text-cyan-100'
+                            : isLightMode
+                              ? 'bg-white/60 border-cyan-100 text-cyan-600/70'
+                              : 'bg-black/10 border-cyan-500/20 text-cyan-200/60'
+                        }`}
+                      >
+                        {step.label}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             )}
 
             {v2Job?.status === 'failed' && (
               <div className={`rounded-lg border p-3 ${isLightMode ? 'bg-rose-50 border-rose-200 text-rose-700' : 'bg-rose-950/20 border-rose-500/30 text-rose-200'}`}>
                 <p className="text-xs font-bold">任务失败</p>
-                <p className="mt-1 text-[11px] leading-relaxed">{v2Job.error?.message ?? 'unknown error'}</p>
+                <p className="mt-1 text-[11px] leading-relaxed">{describeV2Error(v2Job.error)}</p>
                 {v2Job.error && (
                   <p className="mt-1 text-[10px] font-mono">
-                    {v2Job.error.code} · {v2Job.error.phase} · retryable {v2Job.error.retryable ? 'yes' : 'no'}
+                    {v2JobErrorDiagnostic ?? `${v2Job.error.code} · ${v2Job.error.phase} · retryable ${v2Job.error.retryable ? 'yes' : 'no'}`}
                   </p>
                 )}
                 <button

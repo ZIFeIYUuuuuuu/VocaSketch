@@ -43,6 +43,7 @@ class Stage12RecentJobsTests(unittest.TestCase):
         env_patch = {
             "VOCASKETCH_BACKEND_DATA_DIR": tempdir.name,
             "VOCASKETCH_WORKFLOW_STEP_DELAY_SECONDS": "0.02",
+            "VOCASKETCH_RENDER_PROCESS_VIDEO": "0",
             **PROVIDER_ENV_BASELINE,
         }
         if extra_env:
@@ -126,9 +127,9 @@ class Stage12RecentJobsTests(unittest.TestCase):
     def test_recent_jobs_returns_updated_desc_order(self):
         with self._client() as client:
             first_id = self._create_job(client, "first recent job")
-            self._wait_for_status(client, first_id, "preview_ready")
+            self._wait_for_status(client, first_id, "completed")
             second_id = self._create_job(client, "second recent job")
-            self._wait_for_status(client, second_id, "preview_ready")
+            self._wait_for_status(client, second_id, "completed")
 
             response = client.get("/api/v2/drawing-jobs?limit=2")
             self.assertEqual(response.status_code, 200, response.text)
@@ -136,7 +137,7 @@ class Stage12RecentJobsTests(unittest.TestCase):
 
             self.assertEqual(body["limit"], 2)
             self.assertEqual([item["jobId"] for item in body["items"]], [second_id, first_id])
-            self.assertTrue(all(item["status"] == "preview_ready" for item in body["items"]))
+            self.assertTrue(all(item["status"] == "completed" for item in body["items"]))
 
     def test_recent_jobs_status_and_limit_filters(self):
         with self._client() as client:

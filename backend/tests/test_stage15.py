@@ -49,6 +49,7 @@ class Stage15CancelRetryTimeoutTests(unittest.TestCase):
         env_patch = {
             "VOCASKETCH_BACKEND_DATA_DIR": tempdir.name,
             "VOCASKETCH_WORKFLOW_STEP_DELAY_SECONDS": step_delay_seconds,
+            "VOCASKETCH_RENDER_PROCESS_VIDEO": "0",
             **PROVIDER_ENV_BASELINE,
         }
         patcher = mock.patch.dict(os.environ, env_patch, clear=False)
@@ -155,7 +156,7 @@ class Stage15CancelRetryTimeoutTests(unittest.TestCase):
         with self._client() as client:
             job_id = self._create_job(client, "stage15 preview cancel")
             preview = self._wait_for_status(client, job_id, "preview_ready")
-            self.assertTrue(preview["requiresConfirmation"])
+            self.assertFalse(preview["requiresConfirmation"])
             self.assertTrue(preview["previewAssetId"])
 
             cancelled = client.post(f"/api/v2/drawing-jobs/{job_id}/cancel", json={"reason": "stop at preview"})

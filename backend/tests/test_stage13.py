@@ -44,6 +44,7 @@ class Stage13EventResumeTests(unittest.TestCase):
         env_patch = {
             "VOCASKETCH_BACKEND_DATA_DIR": tempdir.name,
             "VOCASKETCH_WORKFLOW_STEP_DELAY_SECONDS": "0.02",
+            "VOCASKETCH_RENDER_PROCESS_VIDEO": "0",
             **PROVIDER_ENV_BASELINE,
         }
         patcher = mock.patch.dict(os.environ, env_patch, clear=False)

@@ -267,6 +267,7 @@ export type PlaybackProcessAction =
       color: string;
       opacity: number;
       speedProfile?: string;
+      source?: string;
     }
   | {
       id: string;
@@ -352,6 +353,9 @@ export interface PlaybackProcess {
     width: number;
     height: number;
     mode: string;
+    processVideoAssetId?: string | null;
+    processVideoContentUrl?: string | null;
+    processVideoMimeType?: string | null;
   };
   phases: PlaybackProcessPhase[];
   actions: PlaybackProcessAction[];

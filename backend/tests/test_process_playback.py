@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 import warnings
+from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
@@ -24,16 +25,18 @@ if str(WORKSPACE_ROOT) not in sys.path:
 
 from vocasketch_backend.main import create_app
 from vocasketch_backend.models import AssetRecord, PlaybackManifest, PlaybackManifestStep
+from vocasketch_backend.providers.base import GeneratedAssetSpec
 from vocasketch_backend.providers.process_playback import enrich_manifest_with_process
 from tools.render_process_manifest import load_optional_asset_image
 
 
 class ProcessPlaybackTests(unittest.TestCase):
-    def _client(self):
+    def _client(self, extra_env: dict[str, str] | None = None):
         tempdir = tempfile.TemporaryDirectory(prefix="vocasketch_backend_process_test_")
         env_patch = {
             "VOCASKETCH_BACKEND_DATA_DIR": tempdir.name,
             "VOCASKETCH_WORKFLOW_STEP_DELAY_SECONDS": "0.02",
+            "VOCASKETCH_RENDER_PROCESS_VIDEO": "1",
             "VOCASKETCH_PROVIDER_PROFILE": "mock",
             "VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS": "0",
             "VOCASKETCH_OPENAI_API_BASE_URL": "",
@@ -41,7 +44,14 @@ class ProcessPlaybackTests(unittest.TestCase):
             "VOCASKETCH_OPENAI_RESPONSE_MODEL": "",
             "VOCASKETCH_OPENAI_IMAGE_MODEL": "",
             "VOCASKETCH_OPENAI_LAYER_MODEL": "",
+            "VOCASKETCH_ENABLE_MODEL_LINEART": "0",
+            "VOCASKETCH_LINEART_PROVIDER": "",
+            "VOCASKETCH_LINEART_MODEL": "",
+            "VOCASKETCH_LINEART_API_BASE_URL": "",
+            "VOCASKETCH_LINEART_API_KEY": "",
         }
+        if extra_env:
+            env_patch.update(extra_env)
         patcher = mock.patch.dict(os.environ, env_patch, clear=False)
 
         class _ClientContext:
@@ -86,13 +96,17 @@ class ProcessPlaybackTests(unittest.TestCase):
             completed = self._wait_for_status(client, job_id, "completed")
 
             process = completed["playbackManifest"]["process"]
-            self.assertEqual(process["version"], "process-v3")
-            self.assertEqual(process["style"], "linedrawer-color-derived")
+            self.assertEqual(process["version"], "process-v16")
+            self.assertEqual(process["style"], "linedrawer-lite-vector")
+            self.assertEqual(process["renderer"], "backend-rendered-process-video")
             self.assertEqual(process["source"]["previewAssetId"], completed["previewAssetId"])
             self.assertEqual(process["source"]["finalAssetId"], completed["finalAssetId"])
             self.assertTrue(process["source"]["finalContentUrl"])
             self.assertTrue(process["source"]["previewContentUrl"])
-            self.assertEqual(process["source"]["mode"], "preview-guided-final-refined-process")
+            self.assertTrue(process["source"]["processVideoAssetId"])
+            self.assertTrue(process["source"]["processVideoContentUrl"])
+            self.assertEqual(process["source"]["processVideoMimeType"], "video/mp4")
+            self.assertEqual(process["source"]["mode"], "final-image-stable-process")
             self.assertEqual(
                 [phase["role"] for phase in process["phases"]],
                 ["sketch", "lineart", "flat_color", "shadow", "lighting", "details"],
@@ -100,9 +114,10 @@ class ProcessPlaybackTests(unittest.TestCase):
             action_types = {action["type"] for action in process["actions"]}
             self.assertTrue({"stroke", "fillRegion", "maskReveal", "layerBadge", "finalReveal"}.issubset(action_types))
             self.assertNotIn("eyeSpark", action_types)
+            self.assertNotIn("lineartPolish", action_types)
             fill_actions = [action for action in process["actions"] if action["type"] == "fillRegion"]
             self.assertTrue(fill_actions)
-            self.assertTrue(all(action.get("sourceImage") == "preview" for action in fill_actions))
+            self.assertTrue(all(action.get("sourceImage") == "final" for action in fill_actions))
             self.assertGreaterEqual(completed["playbackManifest"]["durationMs"], 11000)
 
             serialized = json.dumps(process, ensure_ascii=False)
@@ -114,8 +129,90 @@ class ProcessPlaybackTests(unittest.TestCase):
             manifest_content = client.get(manifest_asset["contentUrl"])
             self.assertEqual(manifest_content.status_code, 200, manifest_content.text)
             manifest_payload = manifest_content.json()
-            self.assertEqual(manifest_payload["process"]["version"], "process-v3")
+            self.assertEqual(manifest_payload["process"]["version"], "process-v16")
             self.assertNotIn("eyeSpark", {action["type"] for action in manifest_payload["process"]["actions"]})
+
+            video_asset = client.get(f"/api/v2/assets/{process['source']['processVideoAssetId']}")
+            self.assertEqual(video_asset.status_code, 200, video_asset.text)
+            video_asset_payload = video_asset.json()
+            self.assertEqual(video_asset_payload["kind"], "process_video")
+            self.assertEqual(video_asset_payload["mimeType"], "video/mp4")
+            video_content = client.get(process["source"]["processVideoContentUrl"])
+            self.assertEqual(video_content.status_code, 200, video_content.text)
+            self.assertEqual(video_content.headers["content-type"], "video/mp4")
+            self.assertGreater(len(video_content.content), 1024)
+
+    def test_model_lineart_asset_drives_process_strokes_when_enabled(self):
+        try:
+            from PIL import Image, ImageDraw
+        except Exception as exc:
+            self.skipTest(f"optional image tooling unavailable: {exc}")
+
+        output = BytesIO()
+        image = Image.new("RGB", (512, 512), "white")
+        draw = ImageDraw.Draw(image)
+        draw.ellipse((140, 80, 372, 390), outline="black", width=6)
+        draw.line((180, 230, 330, 230), fill="black", width=4)
+        image.save(output, format="PNG")
+        output.seek(0)
+        lineart_bytes = output.read()
+
+        async def fake_model_lineart(**kwargs):
+            final_asset = kwargs["final_asset"]
+            return GeneratedAssetSpec(
+                kind="layer",
+                role="lineart",
+                label="Clean Model Lineart",
+                mime_type="image/png",
+                width=512,
+                height=512,
+                order=2,
+                opacity=1.0,
+                blend_mode="multiply",
+                source_final_asset_id=final_asset.assetId,
+                content_bytes=lineart_bytes,
+                file_extension="png",
+                metadata={
+                    "provider": "fake-gemini-lineart",
+                    "model": "fake-lineart-model",
+                    "mode": "model-clean-lineart",
+                    "sourceFinalAssetId": final_asset.assetId,
+                },
+            )
+
+        with mock.patch("vocasketch_backend.workflows.nodes.generate_model_lineart_asset_spec", side_effect=fake_model_lineart):
+            with self._client(
+                {
+                    "VOCASKETCH_PROVIDER_ALLOW_LIVE_REQUESTS": "1",
+                    "VOCASKETCH_RENDER_PROCESS_VIDEO": "0",
+                    "VOCASKETCH_ENABLE_MODEL_LINEART": "1",
+                    "VOCASKETCH_LINEART_PROVIDER": "gemini",
+                    "VOCASKETCH_LINEART_MODEL": "fake-lineart-model",
+                    "VOCASKETCH_LINEART_API_BASE_URL": "https://generativelanguage.googleapis.com/v1beta",
+                    "VOCASKETCH_LINEART_API_KEY": "fake-key",
+                }
+            ) as client:
+                created = client.post("/api/v2/drawing-jobs", json={"inputText": "用模型线稿生成绘画过程", "locale": "zh-CN"})
+                self.assertEqual(created.status_code, 202, created.text)
+                job_id = created.json()["jobId"]
+                self._wait_for_status(client, job_id, "preview_ready")
+                confirmed = client.post(f"/api/v2/drawing-jobs/{job_id}/confirm", json={})
+                self.assertEqual(confirmed.status_code, 200, confirmed.text)
+                completed = self._wait_for_status(client, job_id, "completed")
+
+                lineart_layers = [
+                    layer for layer in completed["layerAssets"]
+                    if layer["role"] == "lineart" and layer["metadata"].get("mode") == "model-clean-lineart"
+                ]
+                self.assertEqual(len(lineart_layers), 1)
+                process = completed["playbackManifest"]["process"]
+                self.assertEqual(process["source"]["lineartAssetId"], lineart_layers[0]["assetId"])
+                self.assertEqual(process["source"]["lineartContentUrl"], lineart_layers[0]["contentUrl"])
+                lineart_strokes = [
+                    action for action in process["actions"]
+                    if action["type"] == "stroke" and action.get("source") == "model-clean-lineart-vector"
+                ]
+                self.assertGreater(len(lineart_strokes), 4)
 
     def test_process_manifest_can_derive_strokes_from_final_image(self):
         try:
@@ -191,19 +288,20 @@ class ProcessPlaybackTests(unittest.TestCase):
             contour_strokes = [
                 action
                 for action in process["actions"]
-                if action["type"] == "stroke" and action.get("source") == "final-image-contour"
+                if action["type"] == "stroke" and str(action.get("source", "")).endswith("lineart-vector")
             ]
 
-            self.assertEqual(process["version"], "process-v3")
-            self.assertEqual(process["source"]["mode"], "preview-guided-final-refined-process")
+            self.assertEqual(process["version"], "process-v16")
+            self.assertEqual(process["source"]["mode"], "final-image-stable-process")
             self.assertEqual(process["source"]["previewAssetId"], preview_asset.assetId)
             self.assertGreater(process["source"]["strokeCount"], 6)
             self.assertGreater(len(contour_strokes), 6)
+            self.assertTrue(all("strokeMeta" in action for action in contour_strokes))
             self.assertLessEqual(max(point["x"] for action in contour_strokes for point in action["points"]), 1)
             self.assertLessEqual(max(point["y"] for action in contour_strokes for point in action["points"]), 1)
             fill_actions = [action for action in process["actions"] if action["type"] == "fillRegion"]
             self.assertTrue(fill_actions)
-            self.assertTrue(all(action.get("sourceImage") == "preview" for action in fill_actions))
+            self.assertTrue(all(action.get("sourceImage") == "final" for action in fill_actions))
 
     def test_process_manifest_filters_border_noise_from_image_derived_strokes(self):
         try:
@@ -281,7 +379,7 @@ class ProcessPlaybackTests(unittest.TestCase):
             contour_strokes = [
                 action
                 for action in process["actions"]
-                if action["type"] == "stroke" and action.get("source") == "final-image-contour"
+                if action["type"] == "stroke" and str(action.get("source", "")).endswith("lineart-vector")
             ]
 
             self.assertTrue(contour_strokes)
@@ -296,7 +394,7 @@ class ProcessPlaybackTests(unittest.TestCase):
             )
             fill_actions = [action for action in process["actions"] if action["type"] == "fillRegion"]
             self.assertTrue(fill_actions)
-            self.assertTrue(all(action.get("sourceImage") == "preview" for action in fill_actions))
+            self.assertTrue(all(action.get("sourceImage") == "final" for action in fill_actions))
 
     def test_old_process_v2_manifest_is_rebuilt(self):
         manifest = PlaybackManifest(
@@ -351,8 +449,8 @@ class ProcessPlaybackTests(unittest.TestCase):
             final_asset=final_asset,
         )
 
-        self.assertEqual(enriched.process["version"], "process-v3")
-        self.assertEqual(enriched.process["source"]["mode"], "preview-guided-final-refined-process")
+        self.assertEqual(enriched.process["version"], "process-v16")
+        self.assertEqual(enriched.process["source"]["mode"], "final-image-stable-process")
         self.assertNotIn("eyeSpark", {action["type"] for action in enriched.process["actions"]})
 
     def test_job_detail_refreshes_old_process_manifest_through_real_api(self):
@@ -373,7 +471,7 @@ class ProcessPlaybackTests(unittest.TestCase):
             self.assertIsNotNone(payload)
             self.assertIsNotNone(payload["playbackManifest"])
             payload["playbackManifest"]["process"] = {
-                "version": "process-v2",
+                "version": "process-v3",
                 "renderer": "canvas-final-image-luma-strokes",
                 "source": {"mode": "final-image-edge-color-process"},
                 "actions": [{"id": "old-eye-spark", "type": "eyeSpark"}],
@@ -384,19 +482,22 @@ class ProcessPlaybackTests(unittest.TestCase):
             self.assertEqual(refreshed_response.status_code, 200, refreshed_response.text)
             refreshed = refreshed_response.json()
             process = refreshed["playbackManifest"]["process"]
-            self.assertEqual(process["version"], "process-v3")
-            self.assertEqual(process["source"]["mode"], "preview-guided-final-refined-process")
+            self.assertEqual(process["version"], "process-v16")
+            self.assertEqual(process["renderer"], "backend-rendered-process-video")
+            self.assertTrue(process["source"]["processVideoAssetId"])
+            self.assertTrue(process["source"]["processVideoContentUrl"])
+            self.assertEqual(process["source"]["mode"], "final-image-stable-process")
             self.assertEqual(process["source"]["previewAssetId"], refreshed["previewAssetId"])
             self.assertEqual(process["source"]["finalAssetId"], refreshed["finalAssetId"])
             self.assertNotIn("eyeSpark", {action["type"] for action in process["actions"]})
             self.assertNotEqual(refreshed["playbackManifestAssetId"], old_manifest_asset_id)
 
             persisted_payload = store._read_json(job_path)
-            self.assertEqual(persisted_payload["playbackManifest"]["process"]["version"], "process-v3")
+            self.assertEqual(persisted_payload["playbackManifest"]["process"]["version"], "process-v16")
             manifest_asset = client.get(f"/api/v2/assets/{refreshed['playbackManifestAssetId']}").json()
             manifest_content = client.get(manifest_asset["contentUrl"])
             self.assertEqual(manifest_content.status_code, 200, manifest_content.text)
-            self.assertEqual(manifest_content.json()["process"]["version"], "process-v3")
+            self.assertEqual(manifest_content.json()["process"]["version"], "process-v16")
 
     def test_render_tool_missing_preview_asset_content_falls_back_to_final(self):
         with tempfile.TemporaryDirectory(prefix="vocasketch_render_tool_test_") as tempdir:

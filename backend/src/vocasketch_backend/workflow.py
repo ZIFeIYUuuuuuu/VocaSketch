@@ -49,9 +49,6 @@ class MockDrawingWorkflowService:
         for job in jobs:
             if job.status in TERMINAL_JOB_STATUSES:
                 continue
-            if job.status == JobStatus.preview_ready and job.requiresConfirmation:
-                self._schedule_post_preview_precompute(job.jobId)
-                continue
             await self.start_job(job.jobId)
 
     async def shutdown(self) -> None:
@@ -76,6 +73,8 @@ class MockDrawingWorkflowService:
     ) -> DrawingJob:
         job = await self._require_job(job_id)
         if job.status != JobStatus.preview_ready or not job.requiresConfirmation:
+            if job.status == JobStatus.preview_ready and not job.requiresConfirmation:
+                return job
             raise WorkflowStateError("job is not waiting for preview confirmation")
 
         job.requiresConfirmation = False
@@ -305,7 +304,7 @@ class MockDrawingWorkflowService:
         if state.previewAsset is None:
             state = await self._drawing_graph.run_generate_preview(state)
             job.previewAssetId = state.previewAsset.assetId
-            job.requiresConfirmation = not self._enable_post_preview_precompute
+            job.requiresConfirmation = False
             await self._apply_state(job, state)
             job = await self._transition(job, JobStatus.preview_ready, 55)
             if job.status != JobStatus.preview_ready:
@@ -317,6 +316,7 @@ class MockDrawingWorkflowService:
                 state.previewAsset.model_dump(mode="json"),
             )
             self._schedule_post_preview_precompute(job.jobId)
+            await self._sleep()
         return state
 
     async def _advance_to_final_ready(self, job: DrawingJob, state: DrawingWorkflowState) -> DrawingWorkflowState:

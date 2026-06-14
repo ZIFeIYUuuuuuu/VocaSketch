@@ -133,7 +133,7 @@ class JobEvent(BaseModel):
     timestamp: datetime = Field(default_factory=utc_now)
 
 
-AssetKind = Literal["preview", "final", "layer", "manifest"]
+AssetKind = Literal["preview", "final", "layer", "manifest", "process_video"]
 
 
 class AssetRecord(BaseModel):

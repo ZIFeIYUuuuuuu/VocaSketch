@@ -3,14 +3,14 @@
 ## v2 Process Playback
 
 - 如果后端 `playbackManifest.process.version=process-v1`，v2 面板优先使用 canvas 动作播放器，而不是只叠加静态 layer image。
-- 当前动作播放器会按时间轴展示草图、线稿、平涂扩散、阴影 `Layer: Multiply`、光照 `Layer: Add / Glow`、最终 `Eye Spark`。
+- 当前动作播放器会按时间轴展示草图、线稿、平涂扩散、阴影 `Layer: Multiply`、光照 `Layer: Add / Glow` 和最终成稿揭示；默认不再追加点睛高光。
 - 旧 job 或旧 manifest 没有 `process` 时，仍 fallback 到原来的 layer/frame playback。
 - 播放器只读取后端 final asset 的 `contentUrl` 和 manifest 动作数据；默认 mock/offline 路径不会触发真实外部模型请求。
 
 ## Stage 15 v2 Operation Guards
 
 - The v2 panel guards create, cancel, and retry with a shared in-flight state so repeated clicks do not send overlapping workflow requests.
-- The current v2 user path does not show a preview or ask for preview confirmation; any backend confirmation breakpoint is auto-advanced so the user waits for drawing-process frames.
+- The current v2 user path does not show a preview or ask for preview confirmation; preview is an internal backend artifact and the user waits for drawing-process frames.
 - Failed jobs only enable retry when the backend snapshot marks `error.retryable=true`.
 - Cancelled and completed jobs are shown as terminal history views; cancelled jobs no longer imply generation is still running.
 - Retry success switches the panel to the new job and keeps the source job visible through `retryOfJobId`.
@@ -53,6 +53,13 @@ VocaSketch 前端是一个 Vite + React 绘图工作台，用于演示语音描�
 - 本地 Canvas：只保留为前端辅助展示，不再依赖旧 Node/V1 后端
 
 默认配置仍不接入真实外部模型，不会发起真实模型网络请求；只有显式 live 环境变量启用后才会走真实 provider。
+
+## v2 默认用户流程
+
+- 语音模式默认使用浏览器 Web Speech，不经过旧 V1 command parser、legacy realtime ASR 或本地头像 trait parser。
+- 用户说完后需要保持约 5 秒静音，前端才会把识别文本收口到确认态。
+- 用户确认后，原始输入会提交到 Python v2 drawing job，由后端文本节点完成 intent parsing / visual brief / image prompt，再进入真实或 mock 生图；前端立即显示 10% 草图、25% 线稿、45% 平涂、65% 阴影、85% 光照、100% 完成的过程骨架。
+- preview/internal composition 只作为后端内部产物，不在用户侧显示确认断点。
 
 ## 本地启动
 
@@ -100,7 +107,7 @@ npm run preview  # 预览构建结果
 ## 当前能力
 
 - 语音输入入口和麦克风状态展示
-- 浏览器 Web Speech 语音输入，识别文本直接提交到 Python v2
+- 浏览器 Web Speech 语音输入，说完静音 5 秒后先进入确认态，用户确认后再创建 Python v2 绘画任务
 - Canvas 二次元水彩头像绘制
 - v2 drawing job 面板
 - 完成后展示 final asset 与 10% 草图、25% 线稿、45% 平涂、65% 阴影、85% 光照、100% 完成帧
